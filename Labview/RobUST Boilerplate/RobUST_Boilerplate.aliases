@@ -1,0 +1,5 @@
+[My Computer]
+My Computer = "10.0.0.12"
+
+[NI-PXIe8880-03117F0A]
+NI-PXIe8880-03117F0A = "10.0.0.62"
