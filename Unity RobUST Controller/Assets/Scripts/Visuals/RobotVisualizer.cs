@@ -12,6 +12,17 @@ public class RobotVisualizer : MonoBehaviour
     public Transform comTrackerVisual;
     public Transform endEffectorVisual;
     public Transform frameTrackerVisual;
+
+    [Header("Body Markers (meters)")]
+    [Min(0.01f)] public float chestMarkerHeight = 0.25f;
+    [Tooltip("Pelvis width, height, and depth in meters. Applied at startup.")]
+    public Vector3 pelvisMarkerSize = new Vector3(0.28f, 0.18f, 0.20f);
+    public Color chestMarkerColor = new Color(0.2f, 0.65f, 1f);
+    public Color pelvisMarkerColor = new Color(1f, 0.5f, 0.15f);
+
+    private Mesh bodyMarkerMesh;
+    private Material chestMarkerMaterial, pelvisMarkerMaterial;
+    private GameObject chestMarker, pelvisMarker;
     
     [Header("Multi-Camera Setup")]
     [Tooltip("Top-Down view (Top Left). Manually placed.")]
@@ -84,11 +95,112 @@ public class RobotVisualizer : MonoBehaviour
         GeneratePulleyVisuals(root);
         GenerateForcePlateVisual(root);
         GenerateGoalTrajectoryVisuals(root);
+        GenerateBodyMarkers();
 
         ConfigureSplitScreen();
 
         isInitialized = true;
         return true;
+    }
+
+    private void GenerateBodyMarkers()
+    {
+        var shader = Shader.Find("Universal Render Pipeline/Unlit") ?? Shader.Find("Unlit/Color");
+        if (shader == null)
+        {
+            Debug.LogError("RobotVisualizer: No supported body marker shader found.", this);
+            return;
+        }
+        bodyMarkerMesh = CreateMarshmallowMesh();
+        chestMarker = CreateBodyMarker("Chest_Body", endEffectorVisual,
+            new Vector3((float)robot.ChestMLDistance, chestMarkerHeight, (float)robot.ChestAPDistance),
+            shader, chestMarkerColor, out chestMarkerMaterial);
+        pelvisMarker = CreateBodyMarker("Pelvis_Body", comTrackerVisual,
+            pelvisMarkerSize, shader, pelvisMarkerColor, out pelvisMarkerMaterial);
+    }
+
+    private GameObject CreateBodyMarker(string name, Transform tracker, Vector3 size,
+        Shader shader, Color color, out Material material)
+    {
+        var marker = new GameObject(name);
+        marker.layer = tracker.gameObject.layer;
+        marker.transform.SetParent(tracker, false);
+        marker.transform.localScale = new Vector3(
+            Mathf.Max(0.01f, size.x), Mathf.Max(0.01f, size.y), Mathf.Max(0.01f, size.z));
+        marker.AddComponent<MeshFilter>().sharedMesh = bodyMarkerMesh;
+        material = new Material(shader);
+        material.color = color;
+        if (material.HasProperty("_BaseColor")) material.SetColor("_BaseColor", color);
+        marker.AddComponent<MeshRenderer>().sharedMaterial = material;
+        return marker;
+    }
+
+    private static Mesh CreateMarshmallowMesh()
+    {
+        // Flat ends and rounded rims, centered on the origin with local Y as height.
+        const int sides = 48, bevelSteps = 6;
+        const float bevel = 0.12f;
+        const int rings = 2 * (bevelSteps + 1) + 2;
+        var vertices = new Vector3[rings * (sides + 1)];
+        var normals = new Vector3[vertices.Length];
+        var triangles = new System.Collections.Generic.List<int>();
+        for (int ring = 0; ring < rings; ring++)
+        {
+            float radius, height, radialNormal, verticalNormal;
+            if (ring == 0 || ring == rings - 1)
+            {
+                radius = 0f;
+                height = ring == 0 ? -0.5f : 0.5f;
+                radialNormal = 0f;
+                verticalNormal = ring == 0 ? -1f : 1f;
+            }
+            else
+            {
+                bool bottom = ring <= bevelSteps + 1;
+                int step = bottom ? ring - 1 : ring - bevelSteps - 2;
+                float angle = (bottom ? -Mathf.PI / 2f : 0f) + step * Mathf.PI / (2f * bevelSteps);
+                radialNormal = Mathf.Cos(angle);
+                verticalNormal = Mathf.Sin(angle);
+                radius = 0.5f - bevel + bevel * radialNormal;
+                height = (bottom ? -0.5f + bevel : 0.5f - bevel) + bevel * verticalNormal;
+            }
+            for (int side = 0; side <= sides; side++)
+            {
+                float angle = side * 2f * Mathf.PI / sides;
+                int index = ring * (sides + 1) + side;
+                vertices[index] = new Vector3(radius * Mathf.Cos(angle), height, radius * Mathf.Sin(angle));
+                normals[index] = new Vector3(radialNormal * Mathf.Cos(angle), verticalNormal, radialNormal * Mathf.Sin(angle));
+            }
+        }
+        for (int ring = 0; ring < rings - 1; ring++)
+        for (int side = 0; side < sides; side++)
+        {
+            int a = ring * (sides + 1) + side;
+            int b = a + sides + 1;
+            if (ring != 0)
+            {
+                triangles.Add(a); triangles.Add(b); triangles.Add(a + 1);
+            }
+            if (ring != rings - 2)
+            {
+                triangles.Add(a + 1); triangles.Add(b); triangles.Add(b + 1);
+            }
+        }
+        var mesh = new Mesh { name = "Marshmallow Body Marker" };
+        mesh.vertices = vertices;
+        mesh.normals = normals;
+        mesh.SetTriangles(triangles, 0);
+        mesh.RecalculateBounds();
+        return mesh;
+    }
+
+    private void OnDestroy()
+    {
+        if (chestMarker != null) Destroy(chestMarker);
+        if (pelvisMarker != null) Destroy(pelvisMarker);
+        if (bodyMarkerMesh != null) Destroy(bodyMarkerMesh);
+        if (chestMarkerMaterial != null) Destroy(chestMarkerMaterial);
+        if (pelvisMarkerMaterial != null) Destroy(pelvisMarkerMaterial);
     }
 
     private void ConfigureSplitScreen()
