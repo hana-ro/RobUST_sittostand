@@ -36,73 +36,65 @@ public class RobotController : MonoBehaviour
     public enum CONTROL_MODE { OFF, TRANSPARENT, IMPEDANCE, ASSIST_AS_NEEDED }
     [SerializeField] private volatile CONTROL_MODE currentControlMode = CONTROL_MODE.OFF;
 
+    // Values are the cable counts, so a scene saved with numCables as a number keeps its setting
+    public enum CABLE_CONFIG
+    {
+        [InspectorName("4 cables: EE only")] EE_ONLY = 4,
+        [InspectorName("8 cables: CoM only")] COM_ONLY = 8,
+        [InspectorName("12 cables: CoM and EE")] COM_AND_EE = 12
+    }
     [Header("Robot Geometry Configuration")]
-    [Tooltip("Number of cables in the system. We currently support 8 or 4 cables")]
-    [SerializeField] private int numCables = 8;
-    [Tooltip("Measured thickness of the pelvis in the anterior-posterior direction [m].")]
-    [SerializeField] private float pelvisAPDistance = 0.2f;
-    [Tooltip("Measured width of the pelvis in the medial-lateral direction [m].")]
-    [SerializeField] private float pelvisMLDistance = 0.3f;
-    [Tooltip("Measured thickness of the trunk in the anterior-posterior direction [m].")]
-    [SerializeField] private float trunkAPDistance = 0.20f;
-    [Tooltip("Measured width of the trunk/chest in the medial-lateral direction [m].")]
-    [SerializeField] private float trunkMLDistance = 0.28f;
+    [Tooltip("Driven cables, which also sets the assisted bodies. Can be changed during Play: a running trial keeps its cables until the next trial. 4 and 12 need the EE motor numbers in RobUSTDescription.")]
+    [SerializeField] private volatile CABLE_CONFIG numCables = CABLE_CONFIG.COM_ONLY;
+    private volatile CABLE_CONFIG trialCableConfig; // numCables as of the current trial's start
+    private CABLE_CONFIG acceptedCableConfig; // last accepted numCables, restored when a change is refused
+    private CABLE_CONFIG shownCableConfig; // cables whose pulleys the visualizer shows
+    [Tooltip("Measured anterior-posterior thickness at the CoM cable attachments [m].")]
+    [SerializeField] private float comAPDistance = 0.2f;
+    [Tooltip("Measured medial-lateral width at the CoM cable attachments [m].")]
+    [SerializeField] private float comMLDistance = 0.3f;
+    [Tooltip("Measured anterior-posterior thickness at the EE cable attachments [m].")]
+    [SerializeField] private float eeAPDistance = 0.20f;
+    [Tooltip("Measured medial-lateral width at the EE cable attachments [m].")]
+    [SerializeField] private float eeMLDistance = 0.28f;
     [Tooltip("User body mass [kg].")]
     [SerializeField] private float userMass = 70.0f;
 
     [Header("Sit-to-Walk Trajectories")]
-    [Tooltip("Filename of the Pelvis GPR trajectory CSV located in Assets/Scripts.")]
-    [SerializeField] private string pelvisTrajectoryCsvName = "SitToWalk_GPR_Pelvis_NoVR_normalized.csv";
-    [Tooltip("Filename of the Trunk GPR trajectory CSV located in Assets/Scripts.")]
-    [SerializeField] private string trunkTrajectoryCsvName = "SitToWalk_GPR_Trunk_NoVR_normalized.csv";
-    [Tooltip("Target duration of the movement [s]. IMPEDANCE plays the target over this time. ASSIST_AS_NEEDED trains to this pace once the pelvis starts moving. NoVR subjects averaged 0.79 s.")]
+    [Tooltip("Filename of the CoM GPR trajectory CSV located in Assets/Scripts.")]
+    [SerializeField] private string comTrajectoryCsvName = "SitToWalk_GPR_Pelvis_NoVR_normalized.csv";
+    [Tooltip("Filename of the EE GPR trajectory CSV located in Assets/Scripts.")]
+    [SerializeField] private string eeTrajectoryCsvName = "SitToWalk_GPR_Trunk_NoVR_normalized.csv";
+    [Tooltip("Target duration of the movement [s]. IMPEDANCE plays the target over this time. ASSIST_AS_NEEDED trains to this pace once the CoM starts moving. NoVR subjects averaged 0.79 s.")]
     [SerializeField] private double stsDuration = 2.0;
-    [Tooltip("Subject leg length: pelvis tracker to floor while standing [m]. Scales AP/ML and, with the seated pelvis height, sets the vertical rise.")]
+    [Tooltip("Subject leg length: CoM tracker to floor while standing [m]. Scales AP/ML and, with the seated CoM height, sets the vertical rise.")]
     [SerializeField] private double userLegLength = 1.07;
-
-    [Header("Assist-as-Needed Force Tunnels (Pelvis and Trunk)")]
-    [Tooltip("Tunnel half-width in SDs of the GPR reference.")]
-    [SerializeField] private double tunnelWidthSD = 2.0;
-    [Tooltip("Smallest allowed tunnel half-width on any axis [m].")]
-    [SerializeField] private double tunnelMinHalfWidth = 0.02;
-    [Tooltip("Allowed time ahead of or behind the target pace before force is applied along the path [s]. 2 SD of NoVR movement duration.")]
-    [SerializeField] private double tunnelTimingBand = 0.26;
-    [Tooltip("Pelvis tunnel force limit [N].")]
-    [SerializeField] private double tunnelMaxForce = 100.0;
-    [Tooltip("Trunk tunnel force limit [N]. Lower than the pelvis until the four trunk cables are tested.")]
-    [SerializeField] private double trunkTunnelMaxForce = 50.0;
-    [Tooltip("Damping against moving further out of the tunnel [N·s/m].")]
-    [SerializeField] private double tunnelDamping = 100.0;
-
-    public enum ASSISTANCE_TARGET { PELVIS_ONLY, TRUNK_ONLY, COMBINED }
-    [Header("Assistance Strategy")]
-    [Tooltip("Which bodies IMPEDANCE and ASSIST_AS_NEEDED assist. Each body is pushed by its own cables. A change takes effect when the next trial starts.")]
-    [SerializeField] private volatile ASSISTANCE_TARGET assistanceTarget = ASSISTANCE_TARGET.PELVIS_ONLY;
-    private volatile ASSISTANCE_TARGET trialAssistanceTarget; // assistanceTarget as of the current trial's start
 
     // Trajectory buffers (Zero-allocation during runtime)
     // Robot-frame fractions: x/y of leg length, z of rise height. Velocities are per unit tau.
-    private double3[] pelvisTrajDisplacements;
-    private double3[] pelvisTrajVelocities;
-    private double3[] pelvisTrajSD;
-    private double3[] trunkTrajDisplacements;
-    private double3[] trunkTrajVelocities;
-    private double3[] trunkTrajSD;
+    private double3[] comTrajDisplacements;
+    private double3[] comTrajVelocities;
+    private double3[] eeTrajDisplacements;
+    private double3[] eeTrajVelocities;
+
+    // Assist-as-needed force limits, as fractions of body weight
+    private const double CoMMaxForceFraction = 0.15;
+    private const double EEMaxForceFraction = 0.10;
+    private const double Gravity = 9.81; // [m/s^2]
 
     private const double MinRiseHeight = 0.1; // below this the subject is not seated [m]
     private const double MaxRestartDrift = 0.10; // allowed distance from the last seated position on restart [m]
     private const double MockSwayAmplitude = 0.10; // [m]
-    private const double MockSlowdown = 1.25; // virtual subject runs late, to show the timing band
+    private const double MockSlowdown = 1.25; // virtual subject runs late, so it falls behind the pacer
     private const double ControlFrequency = 100.0; // [Hz]
     private const int TrajectoryHorizonSteps = 10;
     private const double TunnelPreviewStep = 0.05; // spacing of the path preview, in tau
 
-    private double3 seatedPelvisPos_RF = double3.zero;
-    private double3 seatedTrunkPos_RF = double3.zero;
+    private double3 seatedCoMPos_RF = double3.zero;
+    private double3 seatedEEPos_RF = double3.zero;
     private volatile bool isSeatedPoseValid = false;
-    private double riseHeight = MinRiseHeight; // standing minus seated pelvis height [m], set when a trajectory starts
+    private double riseHeight = MinRiseHeight; // standing minus seated CoM height [m], set when a trajectory starts
     private double trajectoryElapsedTime = 0.0;
-    private double tunnelProgress = 0.0;
     private volatile bool trajectoryTriggered = false;
     private volatile bool isTrajectoryPaused = false;
     private volatile bool isReplayPending = false; // reset to TRANSPARENT, and Space returns to replayControlMode
@@ -121,13 +113,12 @@ public class RobotController : MonoBehaviour
     private DataLogger dataLogger;
 
     // Controllers
-    private ImpedanceController pelvisImpedanceController;
-    private ImpedanceController trunkImpedanceController;
-    private AssistAsNeededController pelvisAssistController;
-    private AssistAsNeededController trunkAssistController;
-    private readonly ReferenceClock tunnelClock = new ReferenceClock();
-    private CableTensionPlanner pelvisTensionPlanner;
-    private CableTensionPlanner trunkTensionPlanner; // null until the trunk cables are configured
+    private ImpedanceController comImpedanceController;
+    private ImpedanceController eeImpedanceController;
+    private AssistAsNeededController comAssistController;
+    private AssistAsNeededController eeAssistController; // null when the EE trajectory did not load
+    private CableTensionPlanner comTensionPlanner;
+    private CableTensionPlanner eeTensionPlanner; // null until the EE motor numbers are entered
 
     // Static frame reference captured only at startup to prevent drift
     private TrackerData robot_frame_tracker;
@@ -148,16 +139,26 @@ public class RobotController : MonoBehaviour
             return;
         }
 
-        if (pelvisAPDistance <= 0 || pelvisMLDistance <= 0 || trunkAPDistance <= 0 || trunkMLDistance <= 0)
+        if (comAPDistance <= 0 || comMLDistance <= 0 || eeAPDistance <= 0 || eeMLDistance <= 0)
         {
-            Debug.LogError("Pelvis and trunk dimensions must be positive values.", this);
+            Debug.LogError("CoM and EE dimensions must be positive values.", this);
             enabled = false;
             return;
         }
 
         // Create RobUST description (single allocation at startup)
-        robotDescription = RobUSTDescription.Create(numCables, pelvisAPDistance, pelvisMLDistance, trunkAPDistance, trunkMLDistance, userMass);
-        Debug.Log($"RobUST description created: {numCables} cables, Pelvis AP={pelvisAPDistance}m ML={pelvisMLDistance}m, Trunk AP={trunkAPDistance}m ML={trunkMLDistance}m");
+        robotDescription = RobUSTDescription.Create(comAPDistance, comMLDistance, eeAPDistance, eeMLDistance, userMass);
+        string cableError = CheckCableConfig(numCables);
+        if (cableError != null)
+        {
+            Debug.LogError($"[RobotController] Robot not started, so there is no control loop, trajectory or motor command. {cableError}", this);
+            robotDescription = null;
+            enabled = false;
+            return;
+        }
+        acceptedCableConfig = numCables;
+        trialCableConfig = numCables;
+        Debug.Log($"RobUST description created: {numCables}, CoM AP={comAPDistance}m ML={comMLDistance}m, EE AP={eeAPDistance}m ML={eeMLDistance}m");
 
         // Initialize Modules
         tcpCommunicator.Initialize();
@@ -196,32 +197,26 @@ public class RobotController : MonoBehaviour
         }
 
         // Finally Initialize Controller modules and begin control thread
-        pelvisImpedanceController = new ImpedanceController(userMass);
-        trunkImpedanceController = new ImpedanceController(userMass);
-        pelvisTensionPlanner = CableTensionPlanner.ForPelvis(robotDescription);
-        if (robotDescription.HasTrunkCables)
-            trunkTensionPlanner = CableTensionPlanner.ForTrunk(robotDescription);
-        else
-            Debug.LogWarning("[RobotController] Trunk cable pulley positions and motor numbers are not entered in RobUSTDescription. Trunk assistance is computed and logged but not sent to any motor.");
+        comImpedanceController = new ImpedanceController(userMass);
+        eeImpedanceController = new ImpedanceController(userMass);
+        // Both planners exist whenever their motors are known, so the cables can be switched during Play
+        comTensionPlanner = CableTensionPlanner.ForCoM(robotDescription);
+        if (robotDescription.EEMotorError == null)
+            eeTensionPlanner = CableTensionPlanner.ForEE(robotDescription);
         mockEEPose_RF = MakePose(new double3(0.2, 0.825, 0.01), quaternion.RotateZ(-math.PI / 2));
         mockComPose_RF = MakePose(new double3(0.2, 0.825, -0.14), quaternion.identity);
-        LoadTrajectories();
-        if (pelvisTrajDisplacements != null && pelvisTrajSD != null)
+        bool isEETrajectoryLoaded = LoadTrajectories();
+        if (comTrajDisplacements != null)
         {
-            pelvisAssistController = new AssistAsNeededController(userMass, pelvisTrajDisplacements, pelvisTrajSD,
-                tunnelWidthSD, tunnelMinHalfWidth, tunnelTimingBand, tunnelMaxForce, tunnelDamping, tunnelClock);
-            if (trunkTrajSD != null)
-            {
-                trunkAssistController = new AssistAsNeededController(userMass, trunkTrajDisplacements, trunkTrajSD,
-                    tunnelWidthSD, tunnelMinHalfWidth, tunnelTimingBand, trunkTunnelMaxForce, tunnelDamping, tunnelClock);
-            }
+            double bodyWeight = userMass * Gravity;
+            comAssistController = new AssistAsNeededController(CoMMaxForceFraction * bodyWeight);
+            if (isEETrajectoryLoaded)
+                eeAssistController = new AssistAsNeededController(EEMaxForceFraction * bodyWeight);
         }
         else if (currentControlMode == CONTROL_MODE.ASSIST_AS_NEEDED)
         {
-            currentControlMode = CONTROL_MODE.OFF; // the Inspector can start here before the tunnel exists
+            currentControlMode = CONTROL_MODE.OFF; // the Inspector can start here without a CoM trajectory
         }
-
-        trialAssistanceTarget = assistanceTarget;
 
         controllerThread = new Thread(controlLoop)
         {
@@ -234,8 +229,47 @@ public class RobotController : MonoBehaviour
         controllerThread.Start();
     }
 
+    // An Inspector change to numCables during Play. Refused changes are undone here; accepted ones are
+    // read by the control loop, and shown by Update, since OnValidate cannot change GameObjects.
+    private void OnValidate()
+    {
+        if (!Application.isPlaying || robotDescription == null || numCables == acceptedCableConfig) return;
+
+        string cableError = CheckCableConfig(numCables);
+        if (cableError != null)
+        {
+            Debug.LogError($"[RobotController] Cables not changed, still {acceptedCableConfig}. {cableError}", this);
+            numCables = acceptedCableConfig;
+            return;
+        }
+        acceptedCableConfig = numCables;
+        Debug.Log(isTrajectoryActive
+            ? $"[RobotController] Cables changed to {numCables}. The running trial keeps {trialCableConfig} until the next trial."
+            : $"[RobotController] Cables changed to {numCables}.", this);
+    }
+
+    // Why a cable configuration cannot be driven, or null when it can
+    private string CheckCableConfig(CABLE_CONFIG config)
+    {
+        if (!Enum.IsDefined(typeof(CABLE_CONFIG), config))
+            return $"Unsupported cable count: {(int)config}. Valid options: 4 (EE only), 8 (CoM only), 12 (CoM and EE).";
+        if (DrivesEE(config) && robotDescription.EEMotorError != null)
+            return robotDescription.EEMotorError;
+        return null;
+    }
+
+    private static bool DrivesCoM(CABLE_CONFIG config) => config != CABLE_CONFIG.EE_ONLY;
+    private static bool DrivesEE(CABLE_CONFIG config) => config != CABLE_CONFIG.COM_ONLY;
+
     private void Update()
     {
+        CABLE_CONFIG cablesNow = isTrajectoryActive ? trialCableConfig : numCables;
+        if (cablesNow != shownCableConfig)
+        {
+            visualizer.SetPulleysVisible(DrivesCoM(cablesNow), DrivesEE(cablesNow));
+            shownCableConfig = cablesNow;
+        }
+
         if (Keyboard.current == null) return;
 
         if (Keyboard.current.iKey.wasPressedThisFrame)
@@ -245,8 +279,8 @@ public class RobotController : MonoBehaviour
 
         if (Keyboard.current.aKey.wasPressedThisFrame)
         {
-            if (pelvisAssistController != null) SetControlMode(CONTROL_MODE.ASSIST_AS_NEEDED);
-            else Debug.LogWarning("[RobotController] Assist-as-needed unavailable: the pelvis trajectory or its SD columns did not load.");
+            if (comAssistController != null) SetControlMode(CONTROL_MODE.ASSIST_AS_NEEDED);
+            else Debug.LogWarning("[RobotController] Assist-as-needed unavailable: the CoM trajectory did not load.");
         }
 
         if (Keyboard.current.spaceKey.wasPressedThisFrame)
@@ -281,17 +315,20 @@ public class RobotController : MonoBehaviour
         isReplayPending = false;
         isSeatedPoseValid = false;
         trajectoryElapsedTime = 0.0;
-        tunnelProgress = 0.0;
         currentControlMode = mode;
     }
 
     private void StartTrajectory()
     {
         trajectoryElapsedTime = 0.0;
-        tunnelProgress = 0.0;
         isTrajectoryPaused = false;
         trajectoryTriggered = true;
+        // Fixed for the whole trial, so a change cannot add or drop a body mid-movement. Set before
+        // the trial goes active, so the control loop never reads the previous trial's cables.
+        trialCableConfig = numCables;
         isTrajectoryActive = true;
+        if (DrivesEE(trialCableConfig) && eeAssistController == null && currentControlMode == CONTROL_MODE.ASSIST_AS_NEEDED)
+            Debug.LogWarning("[RobotController] EE assistance unavailable: the EE trajectory did not load. The EE cables stay at minimum tension.");
     }
 
     public void TriggerOrToggleTrajectory()
@@ -347,79 +384,70 @@ public class RobotController : MonoBehaviour
     }
 
     // Captures the seated pose for a new trial, or cancels the trial if the subject is not seated.
-    private bool TryBeginTrial(in double3 pelvisPos, in double3 trunkPos)
+    private bool TryBeginTrial(in double3 comPos, in double3 eePos)
     {
         trajectoryTriggered = false;
 
-        double seatedPelvisHeight = pelvisPos.z - robotDescription.FloorZ;
-        double rise = userLegLength - seatedPelvisHeight;
-        bool hasDrifted = isSeatedPoseValid && math.distance(pelvisPos, seatedPelvisPos_RF) > MaxRestartDrift;
+        double seatedCoMHeight = comPos.z - robotDescription.FloorZ;
+        double rise = userLegLength - seatedCoMHeight;
+        bool hasDrifted = isSeatedPoseValid && math.distance(comPos, seatedCoMPos_RF) > MaxRestartDrift;
         if (rise < MinRiseHeight || hasDrifted)
         {
-            Debug.LogWarning($"[RobotController] Trial not started: subject is not seated (pelvis height {seatedPelvisHeight:F3}m, leg length {userLegLength:F3}m).");
+            Debug.LogWarning($"[RobotController] Trial not started: subject is not seated (CoM height {seatedCoMHeight:F3}m, leg length {userLegLength:F3}m).");
             isTrajectoryActive = false;
             // A hold at the old seated pose would pull on a subject who is still up
             if (isSeatedPoseValid) ReleaseToTransparent();
             return false;
         }
 
-        seatedPelvisPos_RF = pelvisPos;
-        seatedTrunkPos_RF = trunkPos;
+        seatedCoMPos_RF = comPos;
+        seatedEEPos_RF = eePos;
         isSeatedPoseValid = true;
         riseHeight = rise;
-
-        // Fixed for the whole trial, so an Inspector change cannot switch body mid-movement
-        trialAssistanceTarget = assistanceTarget;
-        if (trialAssistanceTarget != ASSISTANCE_TARGET.PELVIS_ONLY)
-        {
-            if (trunkTensionPlanner == null)
-                Debug.LogWarning("[RobotController] Trunk cables are not configured, so trunk force is computed and logged but not sent to any motor.");
-            if (trunkAssistController == null && currentControlMode == CONTROL_MODE.ASSIST_AS_NEEDED)
-                Debug.LogWarning("[RobotController] Trunk tunnel unavailable: the trunk trajectory or its SD columns did not load.");
-        }
-        //Debug.Log($"[RobotController] Seated pelvis height {seatedPelvisHeight:F3}m, leg length {userLegLength:F3}m, rise height {riseHeight:F3}m.");
+        //Debug.Log($"[RobotController] Seated CoM height {seatedCoMHeight:F3}m, leg length {userLegLength:F3}m, rise height {riseHeight:F3}m.");
         return true;
     }
 
     // Holds both targets at the seated pose, or at the live pose before a trial has captured one.
-    private void FillHoldHorizon(Span<RBState> pelvisHorizon, Span<RBState> trunkHorizon, in double3 livePelvisPos, in double3 liveTrunkPos)
+    private void FillHoldHorizon(Span<RBState> comHorizon, Span<RBState> eeHorizon, in double3 liveCoMPos, in double3 liveEEPos)
     {
-        double3 holdPelvisPos = isSeatedPoseValid ? seatedPelvisPos_RF : livePelvisPos;
-        double3 holdTrunkPos = isSeatedPoseValid ? seatedTrunkPos_RF : liveTrunkPos;
-        pelvisHorizon.Fill(new RBState(holdPelvisPos, new double3(0, 0, -math.PI / 2), double3.zero, double3.zero));
-        trunkHorizon.Fill(new RBState(holdTrunkPos, new double3(0, 0, -math.PI / 2), double3.zero, double3.zero));
+        double3 holdCoMPos = isSeatedPoseValid ? seatedCoMPos_RF : liveCoMPos;
+        double3 holdEEPos = isSeatedPoseValid ? seatedEEPos_RF : liveEEPos;
+        comHorizon.Fill(new RBState(holdCoMPos, new double3(0, 0, -math.PI / 2), double3.zero, double3.zero));
+        eeHorizon.Fill(new RBState(holdEEPos, new double3(0, 0, -math.PI / 2), double3.zero, double3.zero));
     }
 
-    // Virtual subject for checking the tunnels without trackers: follows both paths late while swaying
-    // sideways through the walls, so the targets sweep through their full colour range.
-    private void MakeMockTunnelPoses(out double4x4 pelvisPose, out double4x4 trunkPose)
+    // Virtual subject for checking assist-as-needed without trackers: follows both paths late while swaying
+    // sideways, so the targets sweep through their full colour range.
+    private void MakeMockTunnelPoses(out double4x4 comPose, out double4x4 eePose)
     {
         double mockTime = trajectoryElapsedTime / MockSlowdown;
         double tau = math.saturate(mockTime / math.max(0.1, stsDuration));
         double sway = MockSwayAmplitude * math.sin(4.0 * math.PI * tau);
-        double3 pelvis = EvaluateTrajectory(pelvisTrajDisplacements, pelvisTrajVelocities, mockTime, seatedPelvisPos_RF).p;
-        double3 trunk = EvaluateTrajectory(trunkTrajDisplacements, trunkTrajVelocities, mockTime, seatedTrunkPos_RF).p;
-        pelvis.y += sway;
-        trunk.y += sway;
-        pelvisPose = MakePose(pelvis, quaternion.identity);
-        trunkPose = MakePose(trunk, quaternion.RotateZ(-math.PI / 2));
+        double3 CoM = EvaluateTrajectory(comTrajDisplacements, comTrajVelocities, mockTime, seatedCoMPos_RF).p;
+        double3 EE = EvaluateTrajectory(eeTrajDisplacements, eeTrajVelocities, mockTime, seatedEEPos_RF).p;
+        CoM.y += sway;
+        EE.y += sway;
+        comPose = MakePose(CoM, quaternion.identity);
+        eePose = MakePose(EE, quaternion.RotateZ(-math.PI / 2));
     }
 
-    // Sends a wrench through the pelvis cables.
-    private void CommandPelvisCables(in double4x4 comPose_RF, Wrench wrench, ref double[] tensions, Span<double> motorCommand)
+    // Sends a wrench through the CoM cables. A zero wrench settles them at minimum tension.
+    // Does nothing when the CoM cables are not driven (4).
+    private void CommandCoMCables(bool isDriven, in double4x4 comPose_RF, Wrench wrench, ref double[] tensions, Span<double> motorCommand)
     {
-        if (robotDescription.NumCables == 4 && wrench.Force.z < 0.0) wrench.Force.z = 0.0;
-        tensions = pelvisTensionPlanner.CalculateTensions(comPose_RF, wrench);
+        if (!isDriven) return;
+        tensions = comTensionPlanner.CalculateTensions(comPose_RF, wrench);
         MapTensionsToMotors(tensions, robotDescription.SolverToMotorMap, motorCommand);
     }
 
-    // Sends a wrench through the trunk cables. A zero wrench settles them at minimum tension.
-    // Does nothing until the trunk cables are configured, so no trunk motor is ever guessed.
-    private void CommandTrunkCables(in double4x4 eePose_RF, Wrench wrench, ref double[] tensions, Span<double> motorCommand)
+    // Sends a wrench through the EE cables. A zero wrench settles them at minimum tension.
+    // Does nothing when the EE cables are not driven (8).
+    private void CommandEECables(bool isDriven, in double4x4 eePose_RF, Wrench wrench, ref double[] tensions, Span<double> motorCommand)
     {
-        if (trunkTensionPlanner == null) return;
-        tensions = trunkTensionPlanner.CalculateTensions(eePose_RF, wrench);
-        MapTensionsToMotors(tensions, robotDescription.TrunkSolverToMotorMap, motorCommand);
+        if (!isDriven) return;
+        tensions = eeTensionPlanner.CalculateTensions(eePose_RF, wrench);
+        MapTensionsToMotors(tensions, robotDescription.EESolverToMotorMap, motorCommand);
     }
 
     /// <summary>
@@ -433,20 +461,21 @@ public class RobotController : MonoBehaviour
         double dt = 1.0 / ctrl_freq;
 
         Span<double> motor_tension_command = stackalloc double[14];
-        double[] zeroPelvisTensions = new double[robotDescription.NumCables];
-        double[] zeroTrunkTensions = new double[robotDescription.NumTrunkCables];
-        double[] fixedPelvisTensions = new double[robotDescription.NumCables];
-        Array.Fill(fixedPelvisTensions, 10.0);
-        double[] pelvis_tensions = zeroPelvisTensions; // points at the planner's latest result
-        double[] trunk_tensions = zeroTrunkTensions;
+        double[] zeroCoMTensions = new double[robotDescription.NumCoMCables];
+        double[] zeroEETensions = new double[robotDescription.NumEECables];
+        double[] fixedEETensions = { 10.0, 10.0, 10.0, 10.0 };
+        double[] com_tensions = zeroCoMTensions; // points at the planner's latest result
+        double[] ee_tensions = zeroEETensions;
         Wrench zeroWrench = new Wrench(double3.zero, double3.zero);
-
+        Span<double> measured_tensions = stackalloc double[14]; // load cell tensions from LabVIEW, by motor
+        double[] actuated_com_tensions = new double[robotDescription.NumCoMCables];
+        double[] actuated_ee_tensions = new double[robotDescription.NumEECables];
 
         double4x4 framePose = ToDouble4x4(robot_frame_tracker.PoseMatrix);
         double4x4 frameInv = math.fastinverse(framePose);
         SensorFilter filter_10Hz = new SensorFilter(ctrl_freq, 10.0);
-        Span<RBState> Xref_pelvis_horizon = stackalloc RBState[TrajectoryHorizonSteps];
-        Span<RBState> Xref_trunk_horizon = stackalloc RBState[TrajectoryHorizonSteps];
+        Span<RBState> Xref_com_horizon = stackalloc RBState[TrajectoryHorizonSteps];
+        Span<RBState> Xref_ee_horizon = stackalloc RBState[TrajectoryHorizonSteps];
 
         double system_frequency = System.Diagnostics.Stopwatch.Frequency;
         double ticksToNs = 1_000_000_000.0 / system_frequency;
@@ -478,15 +507,15 @@ public class RobotController : MonoBehaviour
             }
 
             // A lost tracker reads as the origin. Force must never act on a lost or estimated pose.
-            bool isPelvisTracked = math.lengthsq(comPose_RF.c3.xyz) > 0.001;
-            bool isTrunkTracked = math.lengthsq(eePose_RF.c3.xyz) > 0.001;
+            bool isCoMTracked = math.lengthsq(comPose_RF.c3.xyz) > 0.001;
+            bool isEETracked = math.lengthsq(eePose_RF.c3.xyz) > 0.001;
 
-            // Fallback: If chest tracker is unassigned, offline, or lost, estimate trunk pose above pelvis
+            // Fallback: If EE tracker is unassigned, offline, or lost, estimate EE pose above CoM
             if (math.lengthsq(eePose_RF.c3.xyz) <= 0.001)
             {
                 if (math.lengthsq(comPose_RF.c3.xyz) > 0.001)
                 {
-                    // Synthesize chest pose 25 cm above pelvis along robot Z (Up)
+                    // Synthesize EE pose 25 cm above CoM along robot Z (Up)
                     eePose_RF = MakePose(comPose_RF.c3.xyz + new double3(0.0, 0.0, 0.25), quaternion.RotateZ(-math.PI / 2));
                 }
                 else
@@ -511,43 +540,44 @@ public class RobotController : MonoBehaviour
             
             filter_10Hz.Update(comPose_RF, eePose_RF, netFPData);
 
-            double pelvisDeviation = -1.0;
-            double trunkDeviation = -1.0;
+            double comDeviation = -1.0;
+            double eeDeviation = -1.0;
             double referenceProgress = 0.0;
+            Wrench comGoalWrench = zeroWrench; // what the controller requested, for logging
+            Wrench eeGoalWrench = zeroWrench;
             CONTROL_MODE activeControlMode = currentControlMode;
-            ASSISTANCE_TARGET activeTarget = trialAssistanceTarget;
-            bool assistPelvis = activeTarget != ASSISTANCE_TARGET.TRUNK_ONLY;
-            bool assistTrunk = activeTarget != ASSISTANCE_TARGET.PELVIS_ONLY;
+            // A running trial keeps the cables it started with. Undriven cables log zero tension.
+            CABLE_CONFIG activeCables = isTrajectoryActive ? trialCableConfig : numCables;
+            bool assistCoM = DrivesCoM(activeCables);
+            bool assistEE = DrivesEE(activeCables);
+            if (!assistCoM) com_tensions = zeroCoMTensions;
+            if (!assistEE) ee_tensions = zeroEETensions;
 
             switch (activeControlMode)
             {
                 case CONTROL_MODE.OFF:
                     motor_tension_command.Clear();
-                    pelvis_tensions = zeroPelvisTensions;
-                    trunk_tensions = zeroTrunkTensions;
+                    com_tensions = zeroCoMTensions;
+                    ee_tensions = zeroEETensions;
                     visualizer.PushGoalTrajectories(ReadOnlySpan<RBState>.Empty, ReadOnlySpan<RBState>.Empty);
                     break;
                 case CONTROL_MODE.TRANSPARENT:
                     motor_tension_command.Clear();
-                    if (robotDescription.NumCables == 4)
+                    // 8 CoM cables hold a zero wrench (8, 12)
+                    CommandCoMCables(assistCoM, comPose_RF, zeroWrench, ref com_tensions, motor_tension_command);
+                    if (assistEE)
                     {
-                        // Four top cables cannot hold a zero wrench, so they hold a light fixed tension
-                        pelvis_tensions = fixedPelvisTensions;
-                        MapTensionsToMotors(pelvis_tensions, robotDescription.SolverToMotorMap, motor_tension_command);
+                        // Four EE cables cannot hold a zero wrench, so they hold a light fixed tension (4, 12)
+                        ee_tensions = fixedEETensions;
+                        MapTensionsToMotors(ee_tensions, robotDescription.EESolverToMotorMap, motor_tension_command);
                     }
-                    else
-                    {
-                        CommandPelvisCables(comPose_RF, zeroWrench, ref pelvis_tensions, motor_tension_command);
-                    }
-                    CommandTrunkCables(eePose_RF, zeroWrench, ref trunk_tensions, motor_tension_command);
 
                     if (isReplayPending)
                     {
                         isTrajectoryActive = false;
                         isTrajectoryPaused = false;
-                        tunnelProgress = 0.0;
-                        FillHoldHorizon(Xref_pelvis_horizon, Xref_trunk_horizon, comPose_RF.c3.xyz, eePose_RF.c3.xyz);
-                        visualizer.PushGoalTrajectories(Xref_pelvis_horizon, Xref_trunk_horizon);
+                        FillHoldHorizon(Xref_com_horizon, Xref_ee_horizon, comPose_RF.c3.xyz, eePose_RF.c3.xyz);
+                        visualizer.PushGoalTrajectories(Xref_com_horizon, Xref_ee_horizon);
                     }
                     else
                     {
@@ -570,108 +600,105 @@ public class RobotController : MonoBehaviour
                         for (int h = 0; h < TrajectoryHorizonSteps; h++)
                         {
                             double t_h = trajectoryElapsedTime + (h * dt);
-                            Xref_pelvis_horizon[h] = EvaluateTrajectory(pelvisTrajDisplacements, pelvisTrajVelocities, t_h, seatedPelvisPos_RF);
-                            Xref_trunk_horizon[h] = EvaluateTrajectory(trunkTrajDisplacements, trunkTrajVelocities, t_h, seatedTrunkPos_RF);
+                            Xref_com_horizon[h] = EvaluateTrajectory(comTrajDisplacements, comTrajVelocities, t_h, seatedCoMPos_RF);
+                            Xref_ee_horizon[h] = EvaluateTrajectory(eeTrajDisplacements, eeTrajVelocities, t_h, seatedEEPos_RF);
                         }
                     }
                     else
                     {
-                        FillHoldHorizon(Xref_pelvis_horizon, Xref_trunk_horizon, comPose_RF.c3.xyz, eePose_RF.c3.xyz);
+                        FillHoldHorizon(Xref_com_horizon, Xref_ee_horizon, comPose_RF.c3.xyz, eePose_RF.c3.xyz);
                     }
 
-                    RBState targetPelvisState = Xref_pelvis_horizon[0];
-                    RBState targetTrunkState = Xref_trunk_horizon[0];
+                    RBState targetCoMState = Xref_com_horizon[0];
+                    RBState targetEEState = Xref_ee_horizon[0];
 
-                    visualizer.PushGoalTrajectories(Xref_pelvis_horizon, Xref_trunk_horizon);
+                    visualizer.PushGoalTrajectories(Xref_com_horizon, Xref_ee_horizon);
 
-                    pelvisImpedanceController.UpdateState(comPose_RF, filter_10Hz.CoMLinearVelocity, filter_10Hz.CoMAngularVelocity, targetPelvisState);
-                    trunkImpedanceController.UpdateState(eePose_RF, filter_10Hz.EELinearVelocity, filter_10Hz.EEAngularVelocity, targetTrunkState);
+                    comImpedanceController.UpdateState(comPose_RF, filter_10Hz.CoMLinearVelocity, filter_10Hz.CoMAngularVelocity, targetCoMState);
+                    eeImpedanceController.UpdateState(eePose_RF, filter_10Hz.EELinearVelocity, filter_10Hz.EEAngularVelocity, targetEEState);
 
-                    // Each body is pushed by its own cables. An unassisted body gets a zero wrench.
-                    Wrench pelvisGoalWrench = assistPelvis && isPelvisTracked ? pelvisImpedanceController.computeNextControl() : zeroWrench;
-                    Wrench trunkGoalWrench = assistTrunk && isTrunkTracked ? trunkImpedanceController.computeNextControl() : zeroWrench;
+                    // Each body is pushed by its own cables. A body without driven cables gets a zero wrench.
+                    comGoalWrench = assistCoM && isCoMTracked ? comImpedanceController.computeNextControl() : zeroWrench;
+                    eeGoalWrench = assistEE && isEETracked ? eeImpedanceController.computeNextControl() : zeroWrench;
 
                     motor_tension_command.Clear();
-                    CommandPelvisCables(comPose_RF, pelvisGoalWrench, ref pelvis_tensions, motor_tension_command);
-                    CommandTrunkCables(eePose_RF, trunkGoalWrench, ref trunk_tensions, motor_tension_command);
+                    CommandCoMCables(assistCoM, comPose_RF, comGoalWrench, ref com_tensions, motor_tension_command);
+                    CommandEECables(assistEE, eePose_RF, eeGoalWrench, ref ee_tensions, motor_tension_command);
                     break;
                 case CONTROL_MODE.ASSIST_AS_NEEDED:
                     if (trajectoryTriggered)
                     {
                         // A refused start keeps this tick's tensions and takes no new target
                         if (!TryBeginTrial(comPose_RF.c3.xyz, eePose_RF.c3.xyz)) break;
-                        double3 trialScale = new double3(userLegLength, userLegLength, riseHeight);
-                        tunnelClock.Reset(stsDuration);
-                        pelvisAssistController.BeginTrial(seatedPelvisPos_RF, trialScale);
-                        trunkAssistController?.BeginTrial(seatedTrunkPos_RF, trialScale);
                         trajectoryElapsedTime = 0.0;
                     }
 
-                    Wrench pelvisTunnelWrench = zeroWrench;
-                    Wrench trunkTunnelWrench = zeroWrench;
                     if (isTrajectoryActive)
                     {
                         trajectoryElapsedTime += dt;
-                        tunnelClock.Advance(dt);
+                        referenceProgress = math.saturate(trajectoryElapsedTime / math.max(0.1, stsDuration));
 
-                        // Deviation is the larger of leaving the tunnel and falling outside the timing band
-                        double progress = 0.0;
-                        if (assistPelvis)
-                        {
-                            if (isPelvisTracked)
-                            {
-                                pelvisAssistController.UpdateState(comPose_RF, filter_10Hz.CoMLinearVelocity);
-                                pelvisTunnelWrench = pelvisAssistController.computeNextControl();
-                                pelvisDeviation = math.max(pelvisAssistController.Deviation, pelvisAssistController.TimingDeviation);
-                            }
-                            progress = pelvisAssistController.Progress;
-                        }
-                        if (assistTrunk && trunkAssistController != null)
-                        {
-                            if (isTrunkTracked)
-                            {
-                                trunkAssistController.UpdateState(eePose_RF, filter_10Hz.EELinearVelocity);
-                                trunkTunnelWrench = trunkAssistController.computeNextControl();
-                                trunkDeviation = math.max(trunkAssistController.Deviation, trunkAssistController.TimingDeviation);
-                            }
-                            progress = math.max(progress, trunkAssistController.Progress);
-                        }
-                        tunnelProgress = progress;
-
-                        // The first target is where the subject should be now, followed by a preview of what is ahead
+                        // The first target is the pacer, where the subject should be now, followed by a preview of what is ahead
                         double tunnelDuration = math.max(0.1, stsDuration);
-                        referenceProgress = tunnelClock.IsRunning ? tunnelClock.Tau : tunnelProgress;
                         for (int h = 0; h < TrajectoryHorizonSteps; h++)
                         {
                             double t_h = (referenceProgress + (h * TunnelPreviewStep)) * tunnelDuration;
-                            Xref_pelvis_horizon[h] = EvaluateTrajectory(pelvisTrajDisplacements, pelvisTrajVelocities, t_h, seatedPelvisPos_RF);
-                            Xref_trunk_horizon[h] = EvaluateTrajectory(trunkTrajDisplacements, trunkTrajVelocities, t_h, seatedTrunkPos_RF);
+                            Xref_com_horizon[h] = EvaluateTrajectory(comTrajDisplacements, comTrajVelocities, t_h, seatedCoMPos_RF);
+                            Xref_ee_horizon[h] = EvaluateTrajectory(eeTrajDisplacements, eeTrajVelocities, t_h, seatedEEPos_RF);
+                        }
+
+                        // Each body is pulled toward its pacer. A tracked body without driven cables is
+                        // still measured, but gets no wrench.
+                        if (isCoMTracked)
+                        {
+                            comAssistController.UpdateState(comPose_RF, Xref_com_horizon[0].p);
+                            Wrench comPacerWrench = comAssistController.computeNextControl();
+                            if (assistCoM) comGoalWrench = comPacerWrench;
+                            comDeviation = comAssistController.Deviation;
+                        }
+                        if (eeAssistController != null && isEETracked)
+                        {
+                            eeAssistController.UpdateState(eePose_RF, Xref_ee_horizon[0].p);
+                            Wrench eePacerWrench = eeAssistController.computeNextControl();
+                            if (assistEE) eeGoalWrench = eePacerWrench;
+                            eeDeviation = eeAssistController.Deviation;
                         }
                     }
                     else
                     {
-                        FillHoldHorizon(Xref_pelvis_horizon, Xref_trunk_horizon, comPose_RF.c3.xyz, eePose_RF.c3.xyz);
+                        FillHoldHorizon(Xref_com_horizon, Xref_ee_horizon, comPose_RF.c3.xyz, eePose_RF.c3.xyz);
                     }
 
-                    visualizer.PushGoalTrajectories(Xref_pelvis_horizon, Xref_trunk_horizon);
+                    visualizer.PushGoalTrajectories(Xref_com_horizon, Xref_ee_horizon);
 
                     motor_tension_command.Clear();
-                    CommandPelvisCables(comPose_RF, pelvisTunnelWrench, ref pelvis_tensions, motor_tension_command);
-                    CommandTrunkCables(eePose_RF, trunkTunnelWrench, ref trunk_tensions, motor_tension_command);
+                    CommandCoMCables(assistCoM, comPose_RF, comGoalWrench, ref com_tensions, motor_tension_command);
+                    CommandEECables(assistEE, eePose_RF, eeGoalWrench, ref ee_tensions, motor_tension_command);
                     break;
             }
             tcpCommunicator.UpdateTensionSetpoint(motor_tension_command);
             visualizer.PushState(comPose_RF, eePose_RF, fp0, fp1);
-            visualizer.PushTunnelDeviation(pelvisDeviation, trunkDeviation);
+            visualizer.PushTunnelDeviation(comDeviation, eeDeviation);
             if (isLogging)
             {
-                // Logged wrenches are what the cables actually apply, from the commanded tensions
-                Wrench loggedPelvisWrench = pelvisTensionPlanner.CalculateResultantWrench(comPose_RF, pelvis_tensions);
-                Wrench loggedTrunkWrench = trunkTensionPlanner != null
-                    ? trunkTensionPlanner.CalculateResultantWrench(eePose_RF, trunk_tensions)
-                    : zeroWrench;
-                dataLogger.Log(loopStartTick, comPose_RF, eePose_RF, fp0, fp1, loggedPelvisWrench, Xref_pelvis_horizon[0],
-                    loggedTrunkWrench, Xref_trunk_horizon[0], pelvisDeviation, trunkDeviation, referenceProgress);
+                // Goal is the requested wrench. Solver and Measured are what the commanded and the
+                // measured tensions apply (S * T).
+                tcpCommunicator.GetMeasuredTensions(measured_tensions);
+                MapMotorsToTensions(measured_tensions, robotDescription.SolverToMotorMap, actuated_com_tensions);
+                Wrench solverWrench = comTensionPlanner.CalculateResultantWrench(comPose_RF, com_tensions);
+                Wrench measuredWrench = comTensionPlanner.CalculateResultantWrench(comPose_RF, actuated_com_tensions);
+                Wrench eeSolverWrench = zeroWrench;
+                Wrench eeMeasuredWrench = zeroWrench;
+                if (eeTensionPlanner != null)
+                {
+                    MapMotorsToTensions(measured_tensions, robotDescription.EESolverToMotorMap, actuated_ee_tensions);
+                    eeSolverWrench = eeTensionPlanner.CalculateResultantWrench(eePose_RF, ee_tensions);
+                    eeMeasuredWrench = eeTensionPlanner.CalculateResultantWrench(eePose_RF, actuated_ee_tensions);
+                }
+                dataLogger.Log(loopStartTick, comPose_RF, eePose_RF, fp0, fp1,
+                    comGoalWrench, solverWrench, measuredWrench, Xref_com_horizon[0],
+                    eeGoalWrench, eeSolverWrench, eeMeasuredWrench, Xref_ee_horizon[0],
+                    comDeviation, eeDeviation, referenceProgress);
             }
 
             s_WorkloadNs.Value = (long)((System.Diagnostics.Stopwatch.GetTimestamp() - loopStartTick) * ticksToNs);
@@ -725,30 +752,40 @@ public class RobotController : MonoBehaviour
         }
     }
 
-    // Local helpers for loading both Pelvis and Trunk trajectories
-    private void LoadTrajectories()
+    /// <summary>
+    /// Reads one cable set's tensions out of the 14-motor array, in solver order. Inverse of MapTensionsToMotors.
+    /// </summary>
+    private static void MapMotorsToTensions(ReadOnlySpan<double> motorTensions, int[] solverToMotorMap, double[] actuated_tensions)
     {
-        if (string.IsNullOrWhiteSpace(pelvisTrajectoryCsvName)) pelvisTrajectoryCsvName = "SitToWalk_GPR_Pelvis_NoVR_normalized.csv";
-        if (string.IsNullOrWhiteSpace(trunkTrajectoryCsvName)) trunkTrajectoryCsvName = "SitToWalk_GPR_Trunk_NoVR_normalized.csv";
-
-        bool pSuccess = LoadSingleTrajectory(pelvisTrajectoryCsvName, out pelvisTrajDisplacements, out pelvisTrajVelocities, out pelvisTrajSD, "Pelvis");
-        bool tSuccess = LoadSingleTrajectory(trunkTrajectoryCsvName, out trunkTrajDisplacements, out trunkTrajVelocities, out trunkTrajSD, "Trunk");
-
-        if (!tSuccess && pSuccess)
+        for (int actuatedCableIndex = 0; actuatedCableIndex < solverToMotorMap.Length; actuatedCableIndex++)
         {
-            // Good enough for the IMPEDANCE target, but not for a trunk tunnel, which stays off
-            Debug.LogWarning("[RobotController] Trunk trajectory failed to load. Falling back to Pelvis trajectory for trunk, with no trunk tunnel.");
-            trunkTrajDisplacements = pelvisTrajDisplacements;
-            trunkTrajVelocities = pelvisTrajVelocities;
-            trunkTrajSD = null;
+            actuated_tensions[actuatedCableIndex] = motorTensions[solverToMotorMap[actuatedCableIndex]];
         }
     }
 
-    private bool LoadSingleTrajectory(string csvName, out double3[] displacements, out double3[] velocities, out double3[] sd, string tag)
+    // Local helpers for loading both CoM and EE trajectories. Returns whether the EE trajectory loaded.
+    private bool LoadTrajectories()
+    {
+        if (string.IsNullOrWhiteSpace(comTrajectoryCsvName)) comTrajectoryCsvName = "SitToWalk_GPR_Pelvis_NoVR_normalized.csv";
+        if (string.IsNullOrWhiteSpace(eeTrajectoryCsvName)) eeTrajectoryCsvName = "SitToWalk_GPR_Trunk_NoVR_normalized.csv";
+
+        bool pSuccess = LoadSingleTrajectory(comTrajectoryCsvName, out comTrajDisplacements, out comTrajVelocities, "CoM");
+        bool tSuccess = LoadSingleTrajectory(eeTrajectoryCsvName, out eeTrajDisplacements, out eeTrajVelocities, "EE");
+
+        if (!tSuccess && pSuccess)
+        {
+            // Good enough for the IMPEDANCE target, but not for EE assist-as-needed, which stays off
+            Debug.LogWarning("[RobotController] EE trajectory failed to load. Falling back to CoM trajectory for EE, with no EE assist-as-needed.");
+            eeTrajDisplacements = comTrajDisplacements;
+            eeTrajVelocities = comTrajVelocities;
+        }
+        return tSuccess;
+    }
+
+    private bool LoadSingleTrajectory(string csvName, out double3[] displacements, out double3[] velocities, string tag)
     {
         displacements = null;
         velocities = null;
-        sd = null;
         if (string.IsNullOrEmpty(csvName))
         {
             Debug.LogWarning($"[{tag} Trajectory] Trajectory filename is empty.");
@@ -811,20 +848,16 @@ public class RobotController : MonoBehaviour
             int ap = Array.IndexOf(headers, "delta_AP_forward_pct");
             int ml = Array.IndexOf(headers, "delta_ML_left_pct");
             int vert = Array.IndexOf(headers, "delta_Vertical_up_pct");
-            int sdAp = Array.IndexOf(headers, "sd_AP_pct");
-            int sdMl = Array.IndexOf(headers, "sd_ML_pct");
-            int sdVert = Array.IndexOf(headers, "sd_Vertical_pct");
-            if (ap < 0 || ml < 0 || vert < 0 || sdAp < 0 || sdMl < 0 || sdVert < 0)
+            if (ap < 0 || ml < 0 || vert < 0)
             {
-                Debug.LogError($"[{tag} Trajectory] File {path} is missing delta_*_pct or sd_*_pct columns. Regenerate it with trunk_trajectory_analysis.py.");
+                Debug.LogError($"[{tag} Trajectory] File {path} is missing delta_*_pct columns. Regenerate it with trunk_trajectory_analysis.py.");
                 return false;
             }
 
             int count = validLines.Count - 1;
             displacements = new double3[count];
             velocities = new double3[count];
-            sd = new double3[count];
-            int lastColumn = Math.Max(Math.Max(ap, Math.Max(ml, vert)), Math.Max(sdAp, Math.Max(sdMl, sdVert)));
+            int lastColumn = Math.Max(ap, Math.Max(ml, vert));
 
             for (int i = 0; i < count; i++)
             {
@@ -840,11 +873,6 @@ public class RobotController : MonoBehaviour
                     -double.Parse(cols[ap].Trim(), System.Globalization.CultureInfo.InvariantCulture) / 100.0,
                     -double.Parse(cols[ml].Trim(), System.Globalization.CultureInfo.InvariantCulture) / 100.0,
                     double.Parse(cols[vert].Trim(), System.Globalization.CultureInfo.InvariantCulture) / 100.0
-                );
-                sd[i] = new double3(
-                    double.Parse(cols[sdAp].Trim(), System.Globalization.CultureInfo.InvariantCulture) / 100.0,
-                    double.Parse(cols[sdMl].Trim(), System.Globalization.CultureInfo.InvariantCulture) / 100.0,
-                    double.Parse(cols[sdVert].Trim(), System.Globalization.CultureInfo.InvariantCulture) / 100.0
                 );
             }
 
@@ -934,17 +962,14 @@ public class RobotController : MonoBehaviour
 
     private void OnGUI()
     {
-        bool isTunnelMode = currentControlMode == CONTROL_MODE.ASSIST_AS_NEEDED;
-        if (currentControlMode != CONTROL_MODE.IMPEDANCE && !isTunnelMode) return;
+        if (currentControlMode != CONTROL_MODE.IMPEDANCE && currentControlMode != CONTROL_MODE.ASSIST_AS_NEEDED) return;
 
         float trackWidth = 240f;
         float marginX = 24f;
         float lineThickness = 3f;
         float circleDiameter = 14f;
 
-        float progress = isTunnelMode
-            ? (float)tunnelProgress
-            : (float)math.clamp(trajectoryElapsedTime / math.max(0.1, stsDuration), 0.0, 1.0);
+        float progress = (float)math.clamp(trajectoryElapsedTime / math.max(0.1, stsDuration), 0.0, 1.0);
         float lineY = Screen.height - 24f;
 
         // Label above track

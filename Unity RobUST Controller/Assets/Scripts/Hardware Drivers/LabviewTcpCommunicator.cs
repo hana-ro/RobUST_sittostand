@@ -5,6 +5,7 @@ using System;
 using System.Net.Sockets;
 using System.Threading;
 using System.Diagnostics;
+using System.Buffers.Text;
 
 /// <summary>
 /// Handles threaded TCP communication with LabVIEW, continuously sending the latest tension data.
@@ -31,11 +32,19 @@ public class LabviewTcpCommunicator : MonoBehaviour
     private volatile char controlModeCode = 'O';
 
     // Current data to send - pre-allocated during initialization
-    private double[] tensions;
+    private double[] goalTensions;
 
     // --- NEW: Zero-Allocation Buffers ---
     private byte[] sendBuffer;     // Raw bytes to send to TCP
     private char[] formatBuffer;   // Temp buffer for double->string conversion
+
+    // Measured tensions received from LabVIEW
+    private double[] measuredTensions;
+
+    // TCP receive buffers
+    private byte[] receiveBuffer;
+    private byte[] receiveLineBuffer;
+    private int receiveLineLength = 0;
 
     public bool IsConnected { get; private set; } = false;
     /// <summary>
@@ -45,14 +54,18 @@ public class LabviewTcpCommunicator : MonoBehaviour
     public bool Initialize()
     {
         // Pre-allocate arrays based on cable count
-        tensions = new double[14];
+        goalTensions = new double[14];
 
-        // NEW: Allocate buffers once. 
         // Size calc: 1 byte (Mode) + 14 * (1 comma + ~9 chars) + 2 newline = ~150 bytes. 
         // We give 512 for safety.
         sendBuffer = new byte[512];
         formatBuffer = new char[32]; // Enough for one double "0.123456"
         
+        measuredTensions = new double[14];
+
+        receiveBuffer = new byte[1024];
+        receiveLineBuffer = new byte[512];
+        receiveLineLength = 0;
         return true;
     }
 
@@ -64,7 +77,15 @@ public class LabviewTcpCommunicator : MonoBehaviour
         lock (dataLock)
         {
             // Note: 'tensions' array is implicitly converted to a Span<double> here.
-            newTensions.CopyTo(tensions);
+            newTensions.CopyTo(goalTensions);
+        }
+    }
+
+    public void GetMeasuredTensions(Span<double> destination)
+    {
+        lock (dataLock)
+        {
+            measuredTensions.AsSpan().CopyTo(destination);
         }
     }
 
@@ -97,7 +118,7 @@ public class LabviewTcpCommunicator : MonoBehaviour
             
             IsConnected = true;
             isRunning = true;
-            sendThread = new Thread(SendLoop)
+            sendThread = new Thread(TcpLoop)
             {
                 IsBackground = true,
                 Name = "Labview TCP Thread",
@@ -116,7 +137,7 @@ public class LabviewTcpCommunicator : MonoBehaviour
     /// <summary>
     /// Background thread that continuously sends data at precise frequency.
     /// </summary>
-    private void SendLoop()
+    private void TcpLoop()
     {
         if (networkStream == null || tcpClient == null || !tcpClient.Connected)
         {
@@ -126,6 +147,7 @@ public class LabviewTcpCommunicator : MonoBehaviour
         }
 
         Span<double> sendTensions = stackalloc double[14];
+        Span<double> parsedTensions = stackalloc double[14];
 
         // Timing constants
         double frequency = Stopwatch.Frequency;
@@ -142,13 +164,14 @@ public class LabviewTcpCommunicator : MonoBehaviour
 
             lock (dataLock)
             {
-                tensions.AsSpan().CopyTo(sendTensions);
+                goalTensions.AsSpan().CopyTo(sendTensions);
             }
 
             int bytesToSend = FillPacketBuffer(sendTensions, sendBuffer);
             try
             {
                 networkStream.Write(sendBuffer, 0, bytesToSend);
+                DrainIncomingTensions(parsedTensions);
             }
             catch (Exception)
             {
@@ -172,6 +195,19 @@ public class LabviewTcpCommunicator : MonoBehaviour
             {
                 nextTargetTime = now + intervalTicks;
             }
+        }
+    }
+
+    private void DrainIncomingTensions(Span<double> parsedTensions)
+    {
+        int available;
+
+        while ((available = tcpClient.Available) > 0)
+        {
+            int bytesToRead = available < receiveBuffer.Length ? available : receiveBuffer.Length;
+            int bytesRead = networkStream.Read(receiveBuffer, 0, bytesToRead);
+
+            ProcessReceivedBytes(receiveBuffer.AsSpan(0, bytesRead), parsedTensions);
         }
     }
 
@@ -216,16 +252,77 @@ public class LabviewTcpCommunicator : MonoBehaviour
         return pos;
     }
 
+    /// <summary>
+    /// Reads a Span of bytes and separates each number via comma delimiter and stores it in measured_Tensions.
+    /// </summary>
+    private void ProcessReceivedBytes(ReadOnlySpan<byte> bytes, Span<double> parsedTensions)
+    {
+        for (int i = 0; i < bytes.Length; i++)
+        {
+            byte b = bytes[i];
+
+            if (b == (byte)'\r')
+                continue;
+
+            if (b != (byte)'\n')
+            {
+                receiveLineBuffer[receiveLineLength++] = b;
+                continue;
+            }
+
+            int valueIndex = 0;
+            int tokenStart = 0;
+            bool parseOk = true;
+
+            for (int j = 0; j <= receiveLineLength; j++)
+            {
+                bool atEnd = j == receiveLineLength;
+                bool atComma = !atEnd && receiveLineBuffer[j] == (byte)',';
+
+                if (!atEnd && !atComma)
+                    continue;
+
+                int tokenLength = j - tokenStart;
+
+                if (valueIndex >= 14 ||
+                    tokenLength <= 0 ||
+                    !Utf8Parser.TryParse(
+                        receiveLineBuffer.AsSpan(tokenStart, tokenLength),
+                        out double value,
+                        out int consumed) ||
+                    consumed != tokenLength)
+                {
+                    parseOk = false;
+                    break;
+                }
+
+                parsedTensions[valueIndex++] = value;
+                tokenStart = j + 1;
+            }
+
+            if (parseOk && valueIndex == 14)
+            {
+                lock (dataLock)
+                {
+                    parsedTensions.CopyTo(measuredTensions);
+                }
+            }
+
+            receiveLineLength = 0;
+        }
+    }
+
     public void Disconnect()
     {
         if (!IsConnected) return;
         
         isRunning = false;
-        // Wait a bit for the loop to finish its current spin
-        sendThread?.Join(100); 
-        
+
         networkStream?.Close();
         tcpClient?.Close();
+
+        sendThread?.Join(100); 
+
         IsConnected = false;
         
         UnityEngine.Debug.Log("Disconnected from LabVIEW server.");

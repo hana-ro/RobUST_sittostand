@@ -6,7 +6,7 @@ using static Unity.Mathematics.math;
 /// <summary>
 /// Performs the physics calculations to determine the required cable tensions
 /// based on the robot's state and external forces.
-/// One planner serves one set of cables on one body (the pelvis belt or the trunk harness).
+/// One planner serves one set of cables on one body (the CoM cables or the EE cables).
 ///
 /// OPTIMIZATION NOTES:
 /// - Uses Unity.Mathematics (SIMD-optimized) for all vector/matrix operations
@@ -47,22 +47,22 @@ public class CableTensionPlanner
     private double[] previousSolution;
 
     /// <summary>
-    /// Planner for the pelvis cables. Tensions must produce the requested force exactly.
+    /// Planner for the CoM cables. Tensions must produce the requested force exactly.
     /// </summary>
-    public static CableTensionPlanner ForPelvis(RobUSTDescription robot)
+    public static CableTensionPlanner ForCoM(RobUSTDescription robot)
     {
         if (robot == null) throw new ArgumentNullException(nameof(robot));
-        return new CableTensionPlanner(robot.FramePulleyPositions, robot.LocalAttachmentPoints, robot.BeltCenter_EE_Frame, true);
+        return new CableTensionPlanner(robot.FramePulleyPositions, robot.LocalAttachmentPoints, robot.CoMCenter_CoM_Frame, true);
     }
 
     /// <summary>
-    /// Planner for the trunk cables. Too few cables to reach every force, so tensions produce the
+    /// Planner for the EE cables. Too few cables to reach every force, so tensions produce the
     /// closest achievable force instead, and a zero request settles at minimum tension.
     /// </summary>
-    public static CableTensionPlanner ForTrunk(RobUSTDescription robot)
+    public static CableTensionPlanner ForEE(RobUSTDescription robot)
     {
         if (robot == null) throw new ArgumentNullException(nameof(robot));
-        return new CableTensionPlanner(robot.TrunkFramePulleyPositions, robot.LocalTrunkAttachmentPoints, robot.TrunkCenter_EE_Frame, false);
+        return new CableTensionPlanner(robot.EEFramePulleyPositions, robot.LocalEEAttachmentPoints, robot.EECenter_EE_Frame, false);
     }
 
     /// <summary>

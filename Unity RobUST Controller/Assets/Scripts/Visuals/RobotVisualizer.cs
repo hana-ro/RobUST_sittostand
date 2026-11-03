@@ -14,33 +14,33 @@ public class RobotVisualizer : MonoBehaviour
     public Transform frameTrackerVisual;
 
     [Header("Body Markers (meters)")]
-    [Min(0.01f)] public float chestMarkerHeight = 0.25f;
-    // [Tooltip("Chest width, height, and depth in meters. Applied at startup.")]
-    // public Vector3 chestMarkerSize = new Vector3(0.28f, 0.18f, 0.20f);
-    [Tooltip("Pelvis width, height, and depth in meters. Applied at startup.")]
-    public Vector3 pelvisMarkerSize = new Vector3(0.28f, 0.18f, 0.20f);
-    public Vector3 chestMarkerSize = new Vector3(0.28f, 0.18f, 0.20f);
-    public Color chestMarkerColor = new Color(0.2f, 0.65f, 1f, BodyMarkerAlpha);
-    public Color pelvisMarkerColor = new Color(1f, 0.5f, 0.15f, BodyMarkerAlpha);
+    [Min(0.01f)] public float eeMarkerHeight = 0.25f;
+    // [Tooltip("EE width, height, and depth in meters. Applied at startup.")]
+    // public Vector3 eeMarkerSize = new Vector3(0.28f, 0.18f, 0.20f);
+    [Tooltip("CoM width, height, and depth in meters. Applied at startup.")]
+    public Vector3 comMarkerSize = new Vector3(0.28f, 0.18f, 0.20f);
+    public Vector3 eeMarkerSize = new Vector3(0.28f, 0.18f, 0.20f);
+    public Color eeMarkerColor = new Color(0.2f, 0.65f, 1f, BodyMarkerAlpha);
+    public Color comMarkerColor = new Color(1f, 0.5f, 0.15f, BodyMarkerAlpha);
     private const float BodyMarkerAlpha = 0.35f;
 
     [Header("Trajectory Markers")]
     public Color targetMarkerColor = new Color(0.1f, 0.85f, 0.2f, BodyMarkerAlpha);
-    public float targetChestOffset = 0.15f;
-    [Tooltip("Toggle visibility of the target chest marker.")]
-    public bool showTargetChestMarker = true;
-    [Tooltip("Toggle visibility of the target pelvis marker.")]
-    public bool showTargetPelvisMarker = true;
-    [Tooltip("Toggle visibility of the green pelvis trajectory lookahead horizon spheres.")]
-    public bool showPelvisHorizon = true;
-    [Tooltip("Toggle visibility of the cyan trunk trajectory lookahead horizon spheres.")]
-    public bool showTrunkHorizon = true;
+    public float targetEEOffset = 0.15f;
+    [Tooltip("Toggle visibility of the target EE marker.")]
+    public bool showTargetEEMarker = true;
+    [Tooltip("Toggle visibility of the target CoM marker.")]
+    public bool showTargetCoMMarker = true;
+    [Tooltip("Toggle visibility of the green CoM trajectory lookahead horizon spheres.")]
+    public bool showCoMHorizon = true;
+    [Tooltip("Toggle visibility of the cyan EE trajectory lookahead horizon spheres.")]
+    public bool showEEHorizon = true;
 
     private Mesh bodyMarkerMesh;
-    private Material chestMarkerMaterial, pelvisMarkerMaterial;
-    private GameObject chestMarker, pelvisMarker;
-    private Material targetChestMaterial, targetPelvisMaterial;
-    private GameObject targetChestMarker, targetPelvisMarker;
+    private Material eeMarkerMaterial, comMarkerMaterial;
+    private GameObject eeMarker, comMarker;
+    private Material targetEEMaterial, targetCoMMaterial;
+    private GameObject targetEEMarker, targetCoMMarker;
     
     [Header("Multi-Camera Setup")]
     [Tooltip("Top-Down view (Top Left). Manually placed.")]
@@ -48,7 +48,6 @@ public class RobotVisualizer : MonoBehaviour
     [Tooltip("Side view (Left Half). Manually placed.")]
     public Camera sideViewCamera;
     [Tooltip("Back view view (Right Half). This one will track the robot center.")]
-    [UnityEngine.Serialization.FormerlySerializedAs("perspectiveCamera")]
     public Camera backViewCamera;
     public Camera perspectiveCamera { get => backViewCamera; set => backViewCamera = value; }
 
@@ -62,8 +61,8 @@ public class RobotVisualizer : MonoBehaviour
     // -- Goal Trajectory Constants --
     private const int GoalTrajSteps = 10;
     private const float GoalSphereDiameter = 0.1f;
-    private readonly Color GoalTrajColor = new Color(0.0f, 1.0f, 0.0f, 0.4f); // Transparent Green (Pelvis)
-    private readonly Color TrunkTrajColor = new Color(0.1f, 0.65f, 1.0f, 0.4f); // Transparent Cyan (Trunk)
+    private readonly Color GoalTrajColor = new Color(0.0f, 1.0f, 0.0f, 0.4f); // Transparent Green (CoM)
+    private readonly Color EETrajColor = new Color(0.1f, 0.65f, 1.0f, 0.4f); // Transparent Cyan (EE)
 
     // -- Internal State --
     private RobUSTDescription robot;
@@ -73,7 +72,7 @@ public class RobotVisualizer : MonoBehaviour
     private Transform grf0Capsule;
     private Transform grf1Capsule;
     private Transform[] goalTrajectorySpheres;
-    private Transform[] trunkTrajectorySpheres;
+    private Transform[] eeTrajectorySpheres;
 
     // -- Thread Safety --
     private readonly object dataLock = new object();
@@ -88,9 +87,9 @@ public class RobotVisualizer : MonoBehaviour
 
     // Trajectory Caches
     private double3[] _goalTrajectoryCache = new double3[GoalTrajSteps];
-    private double3[] _trunkTrajectoryCache = new double3[GoalTrajSteps];
-    private double _pelvisTunnelDeviation = -1.0;
-    private double _trunkTunnelDeviation = -1.0;
+    private double3[] _eeTrajectoryCache = new double3[GoalTrajSteps];
+    private double _comTunnelDeviation = -1.0;
+    private double _eeTunnelDeviation = -1.0;
 
     public bool Initialize(RobUSTDescription robotDescription)
     {
@@ -128,8 +127,8 @@ public class RobotVisualizer : MonoBehaviour
 
         ConfigureSplitScreen();
 
-        showTargetChestMarker = true;
-        showTargetPelvisMarker = true;
+        showTargetEEMarker = true;
+        showTargetCoMMarker = true;
 
         isInitialized = true;
         return true;
@@ -144,18 +143,18 @@ public class RobotVisualizer : MonoBehaviour
             return;
         }
         bodyMarkerMesh = CreateMarshmallowMesh();
-        Vector3 pelvisSize = new Vector3((float)robot.PelvisMLDistance, pelvisMarkerSize.y, (float)robot.PelvisAPDistance);
-        Vector3 trunkSize = new Vector3((float)robot.TrunkMLDistance, chestMarkerHeight, (float)robot.TrunkAPDistance);
+        Vector3 comSize = new Vector3((float)robot.CoMMLDistance, comMarkerSize.y, (float)robot.CoMAPDistance);
+        Vector3 eeSize = new Vector3((float)robot.EEMLDistance, eeMarkerHeight, (float)robot.EEAPDistance);
 
-        chestMarker = CreateBodyMarker("Chest_Body", endEffectorVisual,
-            trunkSize, shader, chestMarkerColor, out chestMarkerMaterial);
-        pelvisMarker = CreateBodyMarker("Pelvis_Body", comTrackerVisual,
-            pelvisSize, shader, pelvisMarkerColor, out pelvisMarkerMaterial);
+        eeMarker = CreateBodyMarker("EE_Body", endEffectorVisual,
+            eeSize, shader, eeMarkerColor, out eeMarkerMaterial);
+        comMarker = CreateBodyMarker("CoM_Body", comTrackerVisual,
+            comSize, shader, comMarkerColor, out comMarkerMaterial);
 
-        targetChestMarker = CreateBodyMarker("Target_Chest_Body", root,
-            trunkSize * 1.08f, shader, GoalTrajColor, out targetChestMaterial);
-        targetPelvisMarker = CreateBodyMarker("Target_Pelvis_Body", root,
-            pelvisSize * 1.08f, shader, GoalTrajColor, out targetPelvisMaterial);
+        targetEEMarker = CreateBodyMarker("Target_EE_Body", root,
+            eeSize * 1.08f, shader, GoalTrajColor, out targetEEMaterial);
+        targetCoMMarker = CreateBodyMarker("Target_CoM_Body", root,
+            comSize * 1.08f, shader, GoalTrajColor, out targetCoMMaterial);
     }
 
     private GameObject CreateBodyMarker(string name, Transform tracker, Vector3 size,
@@ -252,15 +251,15 @@ public class RobotVisualizer : MonoBehaviour
 
     private void OnDestroy()
     {
-        if (chestMarker != null) Destroy(chestMarker);
-        if (pelvisMarker != null) Destroy(pelvisMarker);
-        if (targetChestMarker != null) Destroy(targetChestMarker);
-        if (targetPelvisMarker != null) Destroy(targetPelvisMarker);
+        if (eeMarker != null) Destroy(eeMarker);
+        if (comMarker != null) Destroy(comMarker);
+        if (targetEEMarker != null) Destroy(targetEEMarker);
+        if (targetCoMMarker != null) Destroy(targetCoMMarker);
         if (bodyMarkerMesh != null) Destroy(bodyMarkerMesh);
-        if (chestMarkerMaterial != null) Destroy(chestMarkerMaterial);
-        if (pelvisMarkerMaterial != null) Destroy(pelvisMarkerMaterial);
-        if (targetChestMaterial != null) Destroy(targetChestMaterial);
-        if (targetPelvisMaterial != null) Destroy(targetPelvisMaterial);
+        if (eeMarkerMaterial != null) Destroy(eeMarkerMaterial);
+        if (comMarkerMaterial != null) Destroy(comMarkerMaterial);
+        if (targetEEMaterial != null) Destroy(targetEEMaterial);
+        if (targetCoMMaterial != null) Destroy(targetCoMMaterial);
     }
 
     private void ConfigureSplitScreen()
@@ -324,32 +323,32 @@ public class RobotVisualizer : MonoBehaviour
 
 
     /// <summary>
-    /// Pushes both pelvis and trunk goal trajectories to the visualizer.
+    /// Pushes both CoM and EE goal trajectories to the visualizer.
     /// </summary>
-    public void PushGoalTrajectories(ReadOnlySpan<RBState> pelvisTrajectory, ReadOnlySpan<RBState> trunkTrajectory)
+    public void PushGoalTrajectories(ReadOnlySpan<RBState> comTrajectory, ReadOnlySpan<RBState> eeTrajectory)
     {
         lock (dataLock)
         {
-            CopyTrajectoryToCache(pelvisTrajectory, _goalTrajectoryCache);
-            CopyTrajectoryToCache(trunkTrajectory, _trunkTrajectoryCache);
+            CopyTrajectoryToCache(comTrajectory, _goalTrajectoryCache);
+            CopyTrajectoryToCache(eeTrajectory, _eeTrajectoryCache);
         }
     }
 
     /// <summary>
-    /// Pushes each segment's tunnel deviation (1 = at the wall or the edge of the timing band).
-    /// Negative when that segment has no active tunnel.
+    /// Pushes each segment's distance from its pacer (1 = inner sphere, 2 = outer sphere).
+    /// Negative when that segment has no assist-as-needed trial running.
     /// </summary>
-    public void PushTunnelDeviation(double pelvisDeviation, double trunkDeviation)
+    public void PushTunnelDeviation(double comDeviation, double eeDeviation)
     {
         lock (dataLock)
         {
-            _pelvisTunnelDeviation = pelvisDeviation;
-            _trunkTunnelDeviation = trunkDeviation;
+            _comTunnelDeviation = comDeviation;
+            _eeTunnelDeviation = eeDeviation;
         }
     }
 
     /// <summary>
-    /// Overload for backwards compatibility (pushes pelvis trajectory only).
+    /// Overload for backwards compatibility (pushes CoM trajectory only).
     /// </summary>
     public void PushGoalTrajectory(ReadOnlySpan<RBState> trajectory)
     {
@@ -385,9 +384,9 @@ public class RobotVisualizer : MonoBehaviour
         // Local cache vars
         double4x4 comMat, eeMat;
         double3 cop0, grf0, cop1, grf1;
-        double pelvisTunnelDeviation, trunkTunnelDeviation;
+        double comTunnelDeviation, eeTunnelDeviation;
         Span<double3> goalSnapshot = stackalloc double3[GoalTrajSteps];
-        Span<double3> trunkSnapshot = stackalloc double3[GoalTrajSteps];
+        Span<double3> eeSnapshot = stackalloc double3[GoalTrajSteps];
 
         lock (dataLock)
         {
@@ -398,12 +397,12 @@ public class RobotVisualizer : MonoBehaviour
             grf0 = _grf0_Robot;
             cop1 = _cop1_Robot;
             grf1 = _grf1_Robot;
-            pelvisTunnelDeviation = _pelvisTunnelDeviation;
-            trunkTunnelDeviation = _trunkTunnelDeviation;
+            comTunnelDeviation = _comTunnelDeviation;
+            eeTunnelDeviation = _eeTunnelDeviation;
             for (int i = 0; i < GoalTrajSteps; i++)
             {
                 goalSnapshot[i] = _goalTrajectoryCache[i];
-                trunkSnapshot[i] = _trunkTrajectoryCache[i];
+                eeSnapshot[i] = _eeTrajectoryCache[i];
             }
         }
 
@@ -432,44 +431,44 @@ public class RobotVisualizer : MonoBehaviour
             if (grf1Capsule != null) grf1Capsule.localScale = Vector3.zero;
         }
 
-        // Update Goal Trajectories (Pelvis: Green, Trunk: Cyan)
-        bool hasPelvisGoal = math.lengthsq(goalSnapshot[0]) > 0.001f;
-        bool hasTrunkGoal = math.lengthsq(trunkSnapshot[0]) > 0.001f;
+        // Update Goal Trajectories (CoM: Green, EE: Cyan)
+        bool hasCoMGoal = math.lengthsq(goalSnapshot[0]) > 0.001f;
+        bool hasEEGoal = math.lengthsq(eeSnapshot[0]) > 0.001f;
 
         for (int i = 0; i < GoalTrajSteps; i++)
         {
             goalTrajectorySpheres[i].position = (Vector3)RobotToUnityPos((float3)goalSnapshot[i]);
-            goalTrajectorySpheres[i].gameObject.SetActive(hasPelvisGoal && showPelvisHorizon);
+            goalTrajectorySpheres[i].gameObject.SetActive(hasCoMGoal && showCoMHorizon);
 
-            if (trunkTrajectorySpheres != null && i < trunkTrajectorySpheres.Length)
+            if (eeTrajectorySpheres != null && i < eeTrajectorySpheres.Length)
             {
-                trunkTrajectorySpheres[i].position = (Vector3)RobotToUnityPos((float3)trunkSnapshot[i]);
-                trunkTrajectorySpheres[i].gameObject.SetActive(hasTrunkGoal && showTrunkHorizon);
+                eeTrajectorySpheres[i].position = (Vector3)RobotToUnityPos((float3)eeSnapshot[i]);
+                eeTrajectorySpheres[i].gameObject.SetActive(hasEEGoal && showEEHorizon);
             }
         }
 
-        if (targetPelvisMarker != null)
+        if (targetCoMMarker != null)
         {
-            bool showP = hasPelvisGoal && showTargetPelvisMarker;
-            targetPelvisMarker.SetActive(showP);
+            bool showP = hasCoMGoal && showTargetCoMMarker;
+            targetCoMMarker.SetActive(showP);
             if (showP)
             {
-                targetPelvisMarker.transform.position = (Vector3)RobotToUnityPos((float3)goalSnapshot[0]);
-                targetPelvisMarker.transform.rotation = comTrackerVisual.rotation;
-                SetMarkerColor(targetPelvisMaterial, pelvisTunnelDeviation >= 0.0 ? DeviationColor(pelvisTunnelDeviation) : GoalTrajColor);
+                targetCoMMarker.transform.position = (Vector3)RobotToUnityPos((float3)goalSnapshot[0]);
+                targetCoMMarker.transform.rotation = comTrackerVisual.rotation;
+                SetMarkerColor(targetCoMMaterial, comTunnelDeviation >= 0.0 ? DeviationColor(comTunnelDeviation) : GoalTrajColor);
             }
         }
-        if (targetChestMarker != null)
+        if (targetEEMarker != null)
         {
-            bool showT = hasTrunkGoal && showTargetChestMarker;
-            targetChestMarker.SetActive(showT);
+            bool showT = hasEEGoal && showTargetEEMarker;
+            targetEEMarker.SetActive(showT);
             if (showT)
             {
-                targetChestMarker.transform.position = (Vector3)RobotToUnityPos((float3)trunkSnapshot[0]);
-                targetChestMarker.transform.rotation = (endEffectorVisual != null && math.lengthsq(eeF.c3.xyz) > 0.001f)
+                targetEEMarker.transform.position = (Vector3)RobotToUnityPos((float3)eeSnapshot[0]);
+                targetEEMarker.transform.rotation = (endEffectorVisual != null && math.lengthsq(eeF.c3.xyz) > 0.001f)
                     ? endEffectorVisual.rotation
                     : comTrackerVisual.rotation;
-                SetMarkerColor(targetChestMaterial, trunkTunnelDeviation >= 0.0 ? DeviationColor(trunkTunnelDeviation) : GoalTrajColor);
+                SetMarkerColor(targetEEMaterial, eeTunnelDeviation >= 0.0 ? DeviationColor(eeTunnelDeviation) : GoalTrajColor);
             }
         }
 
@@ -522,7 +521,7 @@ public class RobotVisualizer : MonoBehaviour
     // Helpers
     // =========================================================
 
-    // Continuous hue sweep: green on the path, yellow at the tunnel wall, red at twice the wall distance.
+    // Continuous hue sweep: green at the pacer, yellow at the inner sphere (force starts), red at the outer (maximum force).
     private static Color DeviationColor(double deviation)
     {
         float hue = Mathf.Lerp(1f / 3f, 0f, Mathf.Clamp01((float)deviation / 2f));
@@ -593,28 +592,36 @@ public class RobotVisualizer : MonoBehaviour
 
     private void GeneratePulleyVisuals(Transform root)
     {
-        // Trunk pulleys are drawn only once their real positions are entered
-        int numTrunk = robot.HasTrunkCables ? robot.NumTrunkCables : 0;
-        int numPelvis = robot.FramePulleyPositions.Length;
-        pulleySpheres = new Transform[numPelvis + numTrunk];
+        // EE pulleys exist only once their motors are entered. SetPulleysVisible shows the driven ones.
+        int numEE = robot.EEMotorError == null ? robot.NumEECables : 0;
+        int numCoM = robot.NumCoMCables;
+        pulleySpheres = new Transform[numCoM + numEE];
 
         for (int i = 0; i < pulleySpheres.Length; i++)
         {
-            bool isTrunk = i >= numPelvis;
+            bool isEE = i >= numCoM;
             var sphere = GameObject.CreatePrimitive(PrimitiveType.Sphere);
-            sphere.name = isTrunk ? $"Trunk_Pulley_{i - numPelvis}" : $"Pulley_{i}";
+            sphere.name = isEE ? $"EE_Pulley_{i - numCoM}" : $"Pulley_{i}";
             sphere.transform.SetParent(root);
             sphere.transform.localScale = new Vector3(0.1f, 0.1f, 0.1f);
 
             Destroy(sphere.GetComponent<Collider>());
-            sphere.GetComponent<Renderer>().material.color = isTrunk ? TrunkTrajColor : Color.gray;
+            sphere.GetComponent<Renderer>().material.color = isEE ? EETrajColor : Color.gray;
 
-            double3 position = isTrunk ? robot.TrunkFramePulleyPositions[i - numPelvis] : robot.FramePulleyPositions[i];
+            double3 position = isEE ? robot.EEFramePulleyPositions[i - numCoM] : robot.FramePulleyPositions[i];
             sphere.transform.position = (Vector3)RobotToUnityPos((float3)position);
             pulleySpheres[i] = sphere.transform;
         }
     }
-    
+
+    /// <summary>Shows the pulleys of the driven cables only. Call from the main thread.</summary>
+    public void SetPulleysVisible(bool CoM, bool EE)
+    {
+        if (pulleySpheres == null) return;
+        for (int i = 0; i < pulleySpheres.Length; i++)
+            pulleySpheres[i].gameObject.SetActive(i < robot.NumCoMCables ? CoM : EE);
+    }
+
     private void GenerateForcePlateVisual(Transform root)
     {
         // Calculate center and orientation from corners in Description
@@ -653,39 +660,39 @@ public class RobotVisualizer : MonoBehaviour
     private void GenerateGoalTrajectoryVisuals(Transform root)
     {
         goalTrajectorySpheres = new Transform[GoalTrajSteps];
-        trunkTrajectorySpheres = new Transform[GoalTrajSteps];
+        eeTrajectorySpheres = new Transform[GoalTrajSteps];
         var trajRoot = new GameObject("Goal_Trajectories").transform;
         trajRoot.SetParent(root);
 
         // Attempt URP Unlit (fastest/cleanest), fallback to Standard
         var shader = Shader.Find("Universal Render Pipeline/Unlit") ?? Shader.Find("Standard");
 
-        var pelvisMat = CreateTrajectoryMaterial(shader, GoalTrajColor);
-        var trunkMat = CreateTrajectoryMaterial(shader, TrunkTrajColor);
+        var comTrajMat = CreateTrajectoryMaterial(shader, GoalTrajColor);
+        var eeTrajMat = CreateTrajectoryMaterial(shader, EETrajColor);
 
         for (int i = 0; i < GoalTrajSteps; i++)
         {
-            // Pelvis Sphere (Green)
+            // CoM Sphere (Green)
             var pSphere = GameObject.CreatePrimitive(PrimitiveType.Sphere);
-            pSphere.name = $"Pelvis_Goal_Step_{i}";
+            pSphere.name = $"CoM_Goal_Step_{i}";
             pSphere.transform.SetParent(trajRoot);
             Destroy(pSphere.GetComponent<Collider>());
-            pSphere.GetComponent<Renderer>().sharedMaterial = pelvisMat;
+            pSphere.GetComponent<Renderer>().sharedMaterial = comTrajMat;
             pSphere.transform.localScale = Vector3.one * GoalSphereDiameter;
             pSphere.transform.position = Vector3.zero;
             pSphere.SetActive(false);
             goalTrajectorySpheres[i] = pSphere.transform;
 
-            // Trunk Sphere (Cyan)
+            // EE Sphere (Cyan)
             var tSphere = GameObject.CreatePrimitive(PrimitiveType.Sphere);
-            tSphere.name = $"Trunk_Goal_Step_{i}";
+            tSphere.name = $"EE_Goal_Step_{i}";
             tSphere.transform.SetParent(trajRoot);
             Destroy(tSphere.GetComponent<Collider>());
-            tSphere.GetComponent<Renderer>().sharedMaterial = trunkMat;
+            tSphere.GetComponent<Renderer>().sharedMaterial = eeTrajMat;
             tSphere.transform.localScale = Vector3.one * GoalSphereDiameter;
             tSphere.transform.position = Vector3.zero;
             tSphere.SetActive(false);
-            trunkTrajectorySpheres[i] = tSphere.transform;
+            eeTrajectorySpheres[i] = tSphere.transform;
         }
     }
 

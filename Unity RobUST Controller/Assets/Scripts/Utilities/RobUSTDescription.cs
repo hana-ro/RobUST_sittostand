@@ -9,53 +9,54 @@ using System;
 /// </summary>
 public sealed class RobUSTDescription
 {
-    public readonly int NumCables;
-    
+    /// <summary>Number of CoM cables</summary>
+    public readonly int NumCoMCables;
+
     /// <summary>Pulley positions in robot frame [m] (double3 for SIMD)</summary>
     public readonly double3[] FramePulleyPositions;
     
-    /// <summary>Cable attachment points on belt, in end-effector frame [m]</summary>
+    /// <summary>CoM cable attachment points, in the CoM tracker frame [m]</summary>
     public readonly double3[] LocalAttachmentPoints;
     
-    /// <summary>Belt center in end-effector frame [m]</summary>
-    public readonly double3 BeltCenter_EE_Frame;
+    /// <summary>CoM center in the CoM tracker frame [m]</summary>
+    public readonly double3 CoMCenter_CoM_Frame;
 
-    /// <summary>Number of trunk cables, which act on the trunk harness separately from the pelvis cables</summary>
-    public readonly int NumTrunkCables;
+    /// <summary>Number of EE cables, which act on the EE harness separately from the CoM cables</summary>
+    public readonly int NumEECables;
 
-    /// <summary>Trunk cable pulley positions in robot frame [m]</summary>
-    public readonly double3[] TrunkFramePulleyPositions;
+    /// <summary>EE cable pulley positions in robot frame [m]</summary>
+    public readonly double3[] EEFramePulleyPositions;
 
-    /// <summary>Trunk cable attachment points on the trunk harness, in chest tracker frame [m]</summary>
-    public readonly double3[] LocalTrunkAttachmentPoints;
+    /// <summary>EE cable attachment points on the EE harness, in EE tracker frame [m]</summary>
+    public readonly double3[] LocalEEAttachmentPoints;
 
-    /// <summary>Trunk center in chest tracker frame [m]</summary>
-    public readonly double3 TrunkCenter_EE_Frame;
+    /// <summary>EE center in EE tracker frame [m]</summary>
+    public readonly double3 EECenter_EE_Frame;
 
-    /// <summary>Mapping from trunk solver index to motor driver index</summary>
-    public readonly int[] TrunkSolverToMotorMap;
+    /// <summary>Mapping from EE solver index to motor driver index</summary>
+    public readonly int[] EESolverToMotorMap;
 
     /// <summary>
-    /// True once the trunk pulley positions and motor numbers have been entered and checked.
-    /// Until then, trunk tensions are never sent to a motor.
+    /// Why the EE cables cannot be driven, or null when their motor numbers are entered and valid.
+    /// Which cables are driven is chosen in RobotController.
     /// </summary>
-    public readonly bool HasTrunkCables;
+    public readonly string EEMotorError;
     
     // ============ User Parameters ============
     /// <summary>User body mass [kg]</summary>
     public readonly double UserMass;
     
-    /// <summary>Pelvis anterior-posterior distance [m]</summary>
-    public readonly double PelvisAPDistance;
+    /// <summary>CoM anterior-posterior distance [m]</summary>
+    public readonly double CoMAPDistance;
     
-    /// <summary>Pelvis medial-lateral distance [m]</summary>
-    public readonly double PelvisMLDistance;
+    /// <summary>CoM medial-lateral distance [m]</summary>
+    public readonly double CoMMLDistance;
 
-    /// <summary>Trunk anterior-posterior distance [m]</summary>
-    public readonly double TrunkAPDistance;
+    /// <summary>EE anterior-posterior distance [m]</summary>
+    public readonly double EEAPDistance;
 
-    /// <summary>Trunk medial-lateral distance [m]</summary>
-    public readonly double TrunkMLDistance;
+    /// <summary>EE medial-lateral distance [m]</summary>
+    public readonly double EEMLDistance;
 
     // ============ Force Plate Geometry ============
     public readonly double3 FP_BackLeft;
@@ -67,7 +68,7 @@ public sealed class RobUSTDescription
     public readonly double FloorZ;
 
     // Full 12-cable hardware definition (Static Database from vive tracker measurement)
-    // 0-7 act on the pelvis belt, 8-11 on the trunk harness
+    // 0-7 are the CoM cables, 8-11 the EE cables
     private static readonly double3[] AllPulleyPositions = new double3[]
     {
 /*         new double3(-0.8000, 1.650, 0.9875),   // 0: Front-Right Top (Motor 10)
@@ -89,8 +90,8 @@ public sealed class RobUSTDescription
         new double3(1.25455282289238, 0.0542982128558426, -1.23426325420294),   // 6: Back-Left Bottom (Motor 2)
         new double3(1.26826084676152, 2.61087432020563, -1.18361414421777),   // 7: Back-Right Bottom (Motor 13)
 
-        // TODO(trunk cables): replace with the measured trunk pulley positions. These placeholders
-        // copy the four top pelvis pulleys so the solver has a plausible geometry for offline testing.
+        // TODO(EE cables): replace with the measured EE pulley positions. These placeholders
+        // copy the four top CoM pulleys so the solver has a plausible geometry for offline testing.
         new double3(-0.576835048372789, 2.57648944314966, 0.252733189583757),   // 8: Front-Right Middle (placeholder)
         new double3(-0.588436088357761, 0.0273606629681548, 0.182261108739911),  // 9: Front-Left Middle (placeholder)
         new double3(1.18955071881626, 0.0229493275829191, 0.264120148165004),    // 10: Back-Left Middle (placeholder)
@@ -101,24 +102,23 @@ public sealed class RobUSTDescription
     // Corresponds to the order in AllPulleyPositions
     // motor mapping is: 10, 5, 4, 11, 8, 7, 2, 13
     // If we change to the middle four motors, the mapping is: _, _, _, _, 8, 7, 2, 13
-    // TODO(trunk cables): replace the four -1 with the trunk motor driver indices (0-13).
-    // Trunk motors are never commanded while any of them is -1.
+    // TODO(EE cables): replace the four -1 with the EE motor driver indices (0-13).
+    // Until then, 4 and 12 cables are refused.
     public static readonly int[] FullMotorMapping = new int[] { 9, 4, 3, 10, 7, 6, 1, 12, -1, -1, -1, -1 };
 
     // Which entries of AllPulleyPositions and FullMotorMapping belong to each body
-    private static readonly int[] PelvisCableIndices = new int[] { 0, 1, 2, 3, 4, 5, 6, 7 };
-    private static readonly int[] TrunkCableIndices = new int[] { 8, 9, 10, 11 };
+    private static readonly int[] CoMCableIndices = new int[] { 0, 1, 2, 3, 4, 5, 6, 7 };
+    private static readonly int[] EECableIndices = new int[] { 8, 9, 10, 11 };
 
     public readonly int[] SolverToMotorMap;
 
-    private RobUSTDescription(int numCables, double pelvisAP, double pelvisML, 
-                              double trunkAP, double trunkML, double userMass)
+    private RobUSTDescription(double comAP, double comML,
+                              double eeAP, double eeML, double userMass)
     {
-        NumCables = numCables;
-        PelvisAPDistance = pelvisAP;
-        PelvisMLDistance = pelvisML;
-        TrunkAPDistance = trunkAP;
-        TrunkMLDistance = trunkML;
+        CoMAPDistance = comAP;
+        CoMMLDistance = comML;
+        EEAPDistance = eeAP;
+        EEMLDistance = eeML;
         UserMass = userMass;
 
         // Force Plate Configuration ----
@@ -133,93 +133,82 @@ public sealed class RobUSTDescription
         FP_FrontRight = new double3(-0.3341, 1.1077, -0.9458) + front_right_correction;
         FloorZ = (FP_BackLeft.z + FP_BackRight.z + FP_FrontLeft.z + FP_FrontRight.z) / 4.0;
         
-        FramePulleyPositions = new double3[numCables];
-        LocalAttachmentPoints = new double3[numCables];
-        SolverToMotorMap = new int[numCables];
+        NumCoMCables = CoMCableIndices.Length;
+        FramePulleyPositions = new double3[NumCoMCables];
+        LocalAttachmentPoints = new double3[NumCoMCables];
+        SolverToMotorMap = new int[NumCoMCables];
 
-        // Determine active subset based on requested numCables
-        int[] activeIndices = numCables switch
-        {
-            8 => PelvisCableIndices,
-            4 => new int[] { 0, 1, 2, 3 }, // Top cables only
-            _ => throw new System.ArgumentException($"Unsupported cable count: {numCables}. valid options: 4, 8")
-        };
-
-        double halfPelvisML = pelvisML / 2.0;
-        double halfTrunkML = trunkML / 2.0;
+        double halfCoMML = comML / 2.0;
+        double halfEEML = eeML / 2.0;
 
         // Populate arrays based on active indices
-        for (int i = 0; i < numCables; i++)
+        for (int i = 0; i < NumCoMCables; i++)
         {
-            int srcIdx = activeIndices[i];
+            int srcIdx = CoMCableIndices[i];
 
             FramePulleyPositions[i] = AllPulleyPositions[srcIdx];
             SolverToMotorMap[i] = FullMotorMapping[srcIdx];
 
-            // Pelvis Attachment Points
-            if (srcIdx == 0 || srcIdx == 4) LocalAttachmentPoints[i] = new double3(-halfPelvisML, -pelvisAP, 0);
-            else if (srcIdx == 1 || srcIdx == 5) LocalAttachmentPoints[i] = new double3(halfPelvisML, -pelvisAP, 0);
-            else if (srcIdx == 2 || srcIdx == 6) LocalAttachmentPoints[i] = new double3(halfPelvisML, 0, 0);
-            else if (srcIdx == 3 || srcIdx == 7) LocalAttachmentPoints[i] = new double3(-halfPelvisML, 0, 0);
+            // CoM Attachment Points
+            if (srcIdx == 0 || srcIdx == 4) LocalAttachmentPoints[i] = new double3(-halfCoMML, -comAP, 0);
+            else if (srcIdx == 1 || srcIdx == 5) LocalAttachmentPoints[i] = new double3(halfCoMML, -comAP, 0);
+            else if (srcIdx == 2 || srcIdx == 6) LocalAttachmentPoints[i] = new double3(halfCoMML, 0, 0);
+            else if (srcIdx == 3 || srcIdx == 7) LocalAttachmentPoints[i] = new double3(-halfCoMML, 0, 0);
         }
 
-        BeltCenter_EE_Frame = new double3(0, -pelvisAP / 2.0, 0);
+        CoMCenter_CoM_Frame = new double3(0, -comAP / 2.0, 0);
 
-        // Trunk Cables ----
-        NumTrunkCables = TrunkCableIndices.Length;
-        TrunkFramePulleyPositions = new double3[NumTrunkCables];
-        TrunkSolverToMotorMap = new int[NumTrunkCables];
-        for (int i = 0; i < NumTrunkCables; i++)
+        // EE Cables ----
+        NumEECables = EECableIndices.Length;
+        EEFramePulleyPositions = new double3[NumEECables];
+        EESolverToMotorMap = new int[NumEECables];
+        for (int i = 0; i < NumEECables; i++)
         {
-            TrunkFramePulleyPositions[i] = AllPulleyPositions[TrunkCableIndices[i]];
-            TrunkSolverToMotorMap[i] = FullMotorMapping[TrunkCableIndices[i]];
+            EEFramePulleyPositions[i] = AllPulleyPositions[EECableIndices[i]];
+            EESolverToMotorMap[i] = FullMotorMapping[EECableIndices[i]];
         }
-        // Same corner order as the trunk entries of AllPulleyPositions
-        LocalTrunkAttachmentPoints = new double3[]
+        // Same corner order as the EE entries of AllPulleyPositions
+        LocalEEAttachmentPoints = new double3[]
         {
-            new double3(-halfTrunkML, -trunkAP, 0), // 8: Front-Right
-            new double3(halfTrunkML, -trunkAP, 0),  // 9: Front-Left
-            new double3(halfTrunkML, 0, 0),         // 10: Back-Left
-            new double3(-halfTrunkML, 0, 0)         // 11: Back-Right
+            new double3(-halfEEML, -eeAP, 0), // 8: Front-Right
+            new double3(halfEEML, -eeAP, 0),  // 9: Front-Left
+            new double3(halfEEML, 0, 0),         // 10: Back-Left
+            new double3(-halfEEML, 0, 0)         // 11: Back-Right
         };
-        TrunkCenter_EE_Frame = new double3(0, -trunkAP / 2.0, 0);
-        HasTrunkCables = ValidateTrunkMotors(SolverToMotorMap, TrunkSolverToMotorMap);
+        EECenter_EE_Frame = new double3(0, -eeAP / 2.0, 0);
+        EEMotorError = CheckEEMotors(SolverToMotorMap, EESolverToMotorMap);
     }
 
-    // Trunk motors are used only when every one is set, in range, and not already a pelvis motor.
-    private static bool ValidateTrunkMotors(int[] pelvisMotors, int[] trunkMotors)
+    // EE motors must all be entered, in range, and not already CoM motors. Returns null when they are.
+    private static string CheckEEMotors(int[] comMotors, int[] eeMotors)
     {
-        for (int i = 0; i < trunkMotors.Length; i++)
+        for (int i = 0; i < eeMotors.Length; i++)
         {
-            if (trunkMotors[i] < 0) return false; // not entered yet
-            if (trunkMotors[i] > 13 || Array.IndexOf(pelvisMotors, trunkMotors[i]) >= 0 || Array.IndexOf(trunkMotors, trunkMotors[i]) != i)
-            {
-                Debug.LogError($"[RobUSTDescription] Trunk motor {trunkMotors[i]} is out of range or already used. Trunk cables are disabled.");
-                return false;
-            }
+            if (eeMotors[i] < 0)
+                return "EE motor numbers are not entered in RobUSTDescription.FullMotorMapping. Enter them, or use 8 cables (CoM only).";
+            if (eeMotors[i] > 13 || Array.IndexOf(comMotors, eeMotors[i]) >= 0 || Array.IndexOf(eeMotors, eeMotors[i]) != i)
+                return $"EE motor {eeMotors[i]} in RobUSTDescription.FullMotorMapping is out of range (0-13) or already used by another cable.";
         }
-        return true;
+        return null;
     }
 
     /// <summary>
-    /// Factory method to create RobUST description from belt/pelvis and trunk configurations.
+    /// Factory method to create RobUST description from the CoM and EE configurations.
     /// All allocations happen here at init - nothing at runtime.
     /// </summary>
-    /// <param name="numCables">Number of cables in the system</param>
-    /// <param name="pelvisAPDistance">Pelvis anterior-posterior distance [m]</param>
-    /// <param name="pelvisMLDistance">Pelvis medial-lateral distance [m]</param>
-    /// <param name="trunkAPDistance">Trunk anterior-posterior distance [m]</param>
-    /// <param name="trunkMLDistance">Trunk medial-lateral distance [m]</param>
+    /// <param name="comAPDistance">CoM anterior-posterior distance [m]</param>
+    /// <param name="comMLDistance">CoM medial-lateral distance [m]</param>
+    /// <param name="eeAPDistance">EE anterior-posterior distance [m]</param>
+    /// <param name="eeMLDistance">EE medial-lateral distance [m]</param>
     /// <param name="userMass">User body mass [kg]</param>
-    public static RobUSTDescription Create(int numCables, double pelvisAPDistance, double pelvisMLDistance,
-                                           double trunkAPDistance, double trunkMLDistance, double userMass)
+    public static RobUSTDescription Create(double comAPDistance, double comMLDistance,
+                                           double eeAPDistance, double eeMLDistance, double userMass)
     {
-        return new RobUSTDescription(numCables, pelvisAPDistance, pelvisMLDistance, trunkAPDistance, trunkMLDistance, userMass);
+        return new RobUSTDescription(comAPDistance, comMLDistance, eeAPDistance, eeMLDistance, userMass);
     }
 
-    public static RobUSTDescription Create(int numCables, double pelvisAPDistance, double pelvisMLDistance,
-                                           double userMass)
+    public static RobUSTDescription Create(double comAPDistance, double comMLDistance, double userMass)
     {
-        return new RobUSTDescription(numCables, pelvisAPDistance, pelvisMLDistance, 0.20, 0.28, userMass);
+        return new RobUSTDescription(comAPDistance, comMLDistance, 0.20, 0.28, userMass);
     }
 }
