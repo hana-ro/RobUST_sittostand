@@ -15,30 +15,55 @@ public class RobotVisualizer : MonoBehaviour
 
     [Header("Body Markers (meters)")]
     [Min(0.01f)] public float chestMarkerHeight = 0.25f;
+    // [Tooltip("Chest width, height, and depth in meters. Applied at startup.")]
+    // public Vector3 chestMarkerSize = new Vector3(0.28f, 0.18f, 0.20f);
     [Tooltip("Pelvis width, height, and depth in meters. Applied at startup.")]
     public Vector3 pelvisMarkerSize = new Vector3(0.28f, 0.18f, 0.20f);
-    public Color chestMarkerColor = new Color(0.2f, 0.65f, 1f);
-    public Color pelvisMarkerColor = new Color(1f, 0.5f, 0.15f);
+    public Vector3 chestMarkerSize = new Vector3(0.28f, 0.18f, 0.20f);
+    public Color chestMarkerColor = new Color(0.2f, 0.65f, 1f, BodyMarkerAlpha);
+    public Color pelvisMarkerColor = new Color(1f, 0.5f, 0.15f, BodyMarkerAlpha);
+    private const float BodyMarkerAlpha = 0.35f;
+
+    [Header("Trajectory Markers")]
+    public Color targetMarkerColor = new Color(0.1f, 0.85f, 0.2f, BodyMarkerAlpha);
+    public float targetChestOffset = 0.15f;
+    [Tooltip("Toggle visibility of the target chest marker.")]
+    public bool showTargetChestMarker = true;
+    [Tooltip("Toggle visibility of the target pelvis marker.")]
+    public bool showTargetPelvisMarker = true;
+    [Tooltip("Toggle visibility of the green pelvis trajectory lookahead horizon spheres.")]
+    public bool showPelvisHorizon = true;
+    [Tooltip("Toggle visibility of the cyan trunk trajectory lookahead horizon spheres.")]
+    public bool showTrunkHorizon = true;
 
     private Mesh bodyMarkerMesh;
     private Material chestMarkerMaterial, pelvisMarkerMaterial;
     private GameObject chestMarker, pelvisMarker;
+    private Material targetChestMaterial, targetPelvisMaterial;
+    private GameObject targetChestMarker, targetPelvisMarker;
     
     [Header("Multi-Camera Setup")]
     [Tooltip("Top-Down view (Top Left). Manually placed.")]
     public Camera topViewCamera;
-    [Tooltip("Side view (Top Right). Manually placed.")]
+    [Tooltip("Side view (Left Half). Manually placed.")]
     public Camera sideViewCamera;
-    [Tooltip("Perspective view (Bottom Half). This one will track the robot center.")]
-    public Camera perspectiveCamera;
-    
+    [Tooltip("Back view view (Right Half). This one will track the robot center.")]
+    [UnityEngine.Serialization.FormerlySerializedAs("perspectiveCamera")]
+    public Camera backViewCamera;
+    public Camera perspectiveCamera { get => backViewCamera; set => backViewCamera = value; }
+
+    [Header("Force Plate Visual")]
+    [Tooltip("Toggle display of the ground reaction forces.")]
+    public bool showForceVisuals = true;
+
     private float metersPerNewton = 0.002f;
     private float forceCapsuleRadius = 0.01f;
 
     // -- Goal Trajectory Constants --
     private const int GoalTrajSteps = 10;
     private const float GoalSphereDiameter = 0.1f;
-    private readonly Color GoalTrajColor = new Color(0.0f, 1.0f, 0.0f, 0.4f); // Transparent Green
+    private readonly Color GoalTrajColor = new Color(0.0f, 1.0f, 0.0f, 0.4f); // Transparent Green (Pelvis)
+    private readonly Color TrunkTrajColor = new Color(0.1f, 0.65f, 1.0f, 0.4f); // Transparent Cyan (Trunk)
 
     // -- Internal State --
     private RobUSTDescription robot;
@@ -48,6 +73,7 @@ public class RobotVisualizer : MonoBehaviour
     private Transform grf0Capsule;
     private Transform grf1Capsule;
     private Transform[] goalTrajectorySpheres;
+    private Transform[] trunkTrajectorySpheres;
 
     // -- Thread Safety --
     private readonly object dataLock = new object();
@@ -62,14 +88,17 @@ public class RobotVisualizer : MonoBehaviour
 
     // Trajectory Caches
     private double3[] _goalTrajectoryCache = new double3[GoalTrajSteps];
+    private double3[] _trunkTrajectoryCache = new double3[GoalTrajSteps];
+    private double _pelvisTunnelDeviation = -1.0;
+    private double _trunkTunnelDeviation = -1.0;
 
     public bool Initialize(RobUSTDescription robotDescription)
     {
         // Validation
         if (comTrackerVisual == null ||
             endEffectorVisual == null ||
-            frameTrackerVisual == null || 
-            perspectiveCamera == null ||
+            frameTrackerVisual == null ||
+            (backViewCamera == null && perspectiveCamera == null) ||
             topViewCamera == null ||
             sideViewCamera == null)
         {
@@ -80,12 +109,12 @@ public class RobotVisualizer : MonoBehaviour
         StripPhysics(comTrackerVisual);
         StripPhysics(endEffectorVisual);
         StripPhysics(frameTrackerVisual);
-        StripPhysics(perspectiveCamera.transform);
+        StripPhysics(backViewCamera.transform);
         StripPhysics(topViewCamera.transform);
         StripPhysics(sideViewCamera.transform);
         Destroy(topViewCamera.GetComponent<AudioListener>());
         Destroy(sideViewCamera.GetComponent<AudioListener>());
-        Destroy(perspectiveCamera.GetComponent<AudioListener>());
+        Destroy(backViewCamera.GetComponent<AudioListener>());
 
         var root = new GameObject("Generated_Visuals").transform;
         root.SetParent(this.transform);
@@ -95,28 +124,38 @@ public class RobotVisualizer : MonoBehaviour
         GeneratePulleyVisuals(root);
         GenerateForcePlateVisual(root);
         GenerateGoalTrajectoryVisuals(root);
-        GenerateBodyMarkers();
+        GenerateBodyMarkers(root);
 
         ConfigureSplitScreen();
+
+        showTargetChestMarker = true;
+        showTargetPelvisMarker = true;
 
         isInitialized = true;
         return true;
     }
 
-    private void GenerateBodyMarkers()
+    private void GenerateBodyMarkers(Transform root)
     {
-        var shader = Shader.Find("Universal Render Pipeline/Unlit") ?? Shader.Find("Unlit/Color");
+        var shader = Shader.Find("Universal Render Pipeline/Unlit") ?? Shader.Find("Standard");
         if (shader == null)
         {
             Debug.LogError("RobotVisualizer: No supported body marker shader found.", this);
             return;
         }
         bodyMarkerMesh = CreateMarshmallowMesh();
+        Vector3 pelvisSize = new Vector3((float)robot.PelvisMLDistance, pelvisMarkerSize.y, (float)robot.PelvisAPDistance);
+        Vector3 trunkSize = new Vector3((float)robot.TrunkMLDistance, chestMarkerHeight, (float)robot.TrunkAPDistance);
+
         chestMarker = CreateBodyMarker("Chest_Body", endEffectorVisual,
-            new Vector3((float)robot.ChestMLDistance, chestMarkerHeight, (float)robot.ChestAPDistance),
-            shader, chestMarkerColor, out chestMarkerMaterial);
+            trunkSize, shader, chestMarkerColor, out chestMarkerMaterial);
         pelvisMarker = CreateBodyMarker("Pelvis_Body", comTrackerVisual,
-            pelvisMarkerSize, shader, pelvisMarkerColor, out pelvisMarkerMaterial);
+            pelvisSize, shader, pelvisMarkerColor, out pelvisMarkerMaterial);
+
+        targetChestMarker = CreateBodyMarker("Target_Chest_Body", root,
+            trunkSize * 1.08f, shader, GoalTrajColor, out targetChestMaterial);
+        targetPelvisMarker = CreateBodyMarker("Target_Pelvis_Body", root,
+            pelvisSize * 1.08f, shader, GoalTrajColor, out targetPelvisMaterial);
     }
 
     private GameObject CreateBodyMarker(string name, Transform tracker, Vector3 size,
@@ -128,9 +167,26 @@ public class RobotVisualizer : MonoBehaviour
         marker.transform.localScale = new Vector3(
             Mathf.Max(0.01f, size.x), Mathf.Max(0.01f, size.y), Mathf.Max(0.01f, size.z));
         marker.AddComponent<MeshFilter>().sharedMesh = bodyMarkerMesh;
+
         material = new Material(shader);
+
+        // Configure transparency
+        material.SetFloat("_Surface", 1); // Transparent in URP
+        material.SetFloat("_Mode", 3);    // Transparent in Standard
+        material.SetFloat("_Blend", 0);   // Alpha blend
+        material.SetInt("_SrcBlend", (int)UnityEngine.Rendering.BlendMode.SrcAlpha);
+        material.SetInt("_DstBlend", (int)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha);
+        material.SetInt("_ZWrite", 0);
+        material.EnableKeyword("_ALPHABLEND_ON");
+        material.EnableKeyword("_SURFACE_TYPE_TRANSPARENT");
+        material.renderQueue = 3000;
+
+        // Hardcode fixed translucent opacity
+        color.a = BodyMarkerAlpha;
         material.color = color;
         if (material.HasProperty("_BaseColor")) material.SetColor("_BaseColor", color);
+        if (material.HasProperty("_Color")) material.SetColor("_Color", color);
+
         marker.AddComponent<MeshRenderer>().sharedMaterial = material;
         return marker;
     }
@@ -198,46 +254,54 @@ public class RobotVisualizer : MonoBehaviour
     {
         if (chestMarker != null) Destroy(chestMarker);
         if (pelvisMarker != null) Destroy(pelvisMarker);
+        if (targetChestMarker != null) Destroy(targetChestMarker);
+        if (targetPelvisMarker != null) Destroy(targetPelvisMarker);
         if (bodyMarkerMesh != null) Destroy(bodyMarkerMesh);
         if (chestMarkerMaterial != null) Destroy(chestMarkerMaterial);
         if (pelvisMarkerMaterial != null) Destroy(pelvisMarkerMaterial);
+        if (targetChestMaterial != null) Destroy(targetChestMaterial);
+        if (targetPelvisMaterial != null) Destroy(targetPelvisMaterial);
     }
 
     private void ConfigureSplitScreen()
     {
         // Screen Layout:
-        // |              |              |
-        // |   Top View   |   Side View  |
-        // |  (Top Left)  |  (Top Right) |
-        // |______________|______________|
-        // |                             |
-        // |        Perspective          |
-        // |       (Bottom Half)         |
-        // |_____________________________|
+        // ----------------------+----------------------
+        // |                      |                     |
+        // | Side View from Left  |    Back View        |
+        // |       (Left)         |     (Right)         |
+        // |                      |                     |
+        // |                      |                     |
+        // ----------------------+----------------------
         float3 robust_center = new float3(0f, 0.7f, 0.2f);
-
-        if (topViewCamera != null)
-        {
-            topViewCamera.rect = new Rect(0.0f, 0.5f, 0.5f, 0.5f);
-            topViewCamera.transform.position = (Vector3)RobotToUnityPos(robust_center + new float3(0f, 0f, 1.5f));
-            topViewCamera.transform.LookAt((Vector3)RobotToUnityPos(robust_center), -Vector3.right);
-        }
 
         if (sideViewCamera != null)
         {
-            sideViewCamera.rect = new Rect(0.5f, 0.5f, 0.5f, 0.5f);
-            sideViewCamera.transform.position = (Vector3)RobotToUnityPos(robust_center + new float3(0f, 1.5f, 0f));
+            // sideViewCamera.orthographic = true;
+            // sideViewCamera.orthographicSize = 2.25f;
+            // Left half of screen
+            sideViewCamera.rect = new Rect(0.0f, 0.0f, 0.5f, 1.0f);
+            float3 sidePos = robust_center + new float3(0f, -3.3f, 0f);
+
+            sideViewCamera.transform.position = (Vector3)RobotToUnityPos(sidePos);
             sideViewCamera.transform.LookAt((Vector3)RobotToUnityPos(robust_center));
         }
 
-        // Perspective camera covers total bottom width (1.0f) and half height (0.5f)
-        // Starting at X=0, Y=0
-        if (perspectiveCamera != null)
+        //
+        // RIGHT PANEL: BACK VIEW
+        //
+        if (backViewCamera != null)
         {
-            perspectiveCamera.rect = new Rect(0.0f, 0.0f, 1.0f, 0.5f);
-            float3 camPos = new float3(2.5f, 1.2f, .7f);
-            perspectiveCamera.transform.position = (Vector3)RobotToUnityPos(camPos);
-            perspectiveCamera.transform.LookAt((Vector3)RobotToUnityPos(robust_center));
+            backViewCamera.orthographic = true;
+            backViewCamera.orthographicSize = 2.25f;
+            backViewCamera.rect = new Rect(0.5f, 0.0f, 0.5f, 1.0f);
+
+            // Back view along robot X axis
+            float3 backPos = robust_center + new float3(4.0f, 0f, 0f);
+            float3 backViewCenter = robust_center + new float3(0f, 0.5f, 0f);
+
+            backViewCamera.transform.position = (Vector3)RobotToUnityPos(backPos);
+            backViewCamera.transform.LookAt((Vector3)RobotToUnityPos(backViewCenter), Vector3.up);
         }
     }
 
@@ -260,30 +324,57 @@ public class RobotVisualizer : MonoBehaviour
 
 
     /// <summary>
-    /// Pushes a goal trajectory to the visualizer.
-    /// If span < 10, the last valid point is repeated for remaining spheres.
-    /// If span >= 10, the first 10 points are used.
+    /// Pushes both pelvis and trunk goal trajectories to the visualizer.
+    /// </summary>
+    public void PushGoalTrajectories(ReadOnlySpan<RBState> pelvisTrajectory, ReadOnlySpan<RBState> trunkTrajectory)
+    {
+        lock (dataLock)
+        {
+            CopyTrajectoryToCache(pelvisTrajectory, _goalTrajectoryCache);
+            CopyTrajectoryToCache(trunkTrajectory, _trunkTrajectoryCache);
+        }
+    }
+
+    /// <summary>
+    /// Pushes each segment's tunnel deviation (1 = at the wall or the edge of the timing band).
+    /// Negative when that segment has no active tunnel.
+    /// </summary>
+    public void PushTunnelDeviation(double pelvisDeviation, double trunkDeviation)
+    {
+        lock (dataLock)
+        {
+            _pelvisTunnelDeviation = pelvisDeviation;
+            _trunkTunnelDeviation = trunkDeviation;
+        }
+    }
+
+    /// <summary>
+    /// Overload for backwards compatibility (pushes pelvis trajectory only).
     /// </summary>
     public void PushGoalTrajectory(ReadOnlySpan<RBState> trajectory)
     {
-        if (trajectory.IsEmpty) return;
+        PushGoalTrajectories(trajectory, ReadOnlySpan<RBState>.Empty);
+    }
 
-        lock (dataLock)
+    private static void CopyTrajectoryToCache(ReadOnlySpan<RBState> source, double3[] cache)
+    {
+        if (source.IsEmpty)
         {
-            int len = trajectory.Length;
-            int copyCount = (len < GoalTrajSteps) ? len : GoalTrajSteps;
+            Array.Clear(cache, 0, GoalTrajSteps);
+            return;
+        }
 
-            // 1. Copy available points
-            for (int i = 0; i < copyCount; i++)
-                _goalTrajectoryCache[i] = trajectory[i].p;
+        int len = source.Length;
+        int copyCount = (len < GoalTrajSteps) ? len : GoalTrajSteps;
 
-            // 2. Clamp remaining if short trajectory
-            if (len < GoalTrajSteps)
-            {
-                double3 lastP = trajectory[len - 1].p;
-                for (int i = len; i < GoalTrajSteps; i++)
-                    _goalTrajectoryCache[i] = lastP;
-            }
+        for (int i = 0; i < copyCount; i++)
+            cache[i] = source[i].p;
+
+        if (len < GoalTrajSteps)
+        {
+            double3 lastP = source[len - 1].p;
+            for (int i = len; i < GoalTrajSteps; i++)
+                cache[i] = lastP;
         }
     }
 
@@ -294,7 +385,9 @@ public class RobotVisualizer : MonoBehaviour
         // Local cache vars
         double4x4 comMat, eeMat;
         double3 cop0, grf0, cop1, grf1;
+        double pelvisTunnelDeviation, trunkTunnelDeviation;
         Span<double3> goalSnapshot = stackalloc double3[GoalTrajSteps];
+        Span<double3> trunkSnapshot = stackalloc double3[GoalTrajSteps];
 
         lock (dataLock)
         {
@@ -305,6 +398,13 @@ public class RobotVisualizer : MonoBehaviour
             grf0 = _grf0_Robot;
             cop1 = _cop1_Robot;
             grf1 = _grf1_Robot;
+            pelvisTunnelDeviation = _pelvisTunnelDeviation;
+            trunkTunnelDeviation = _trunkTunnelDeviation;
+            for (int i = 0; i < GoalTrajSteps; i++)
+            {
+                goalSnapshot[i] = _goalTrajectoryCache[i];
+                trunkSnapshot[i] = _trunkTrajectoryCache[i];
+            }
         }
 
         // 1. Cast to float4x4 once (Visuals don't need double precision)
@@ -321,18 +421,120 @@ public class RobotVisualizer : MonoBehaviour
         frameTrackerVisual.localPosition = Vector3.zero; 
         frameTrackerVisual.localRotation = Quaternion.identity;
 
-        UpdateForceCapsule(grf0Capsule, RobotToUnityPos((float3)cop0), RobotToUnityPos((float3)grf0));
-        UpdateForceCapsule(grf1Capsule, RobotToUnityPos((float3)cop1), RobotToUnityPos((float3)grf1));
+        if (showForceVisuals)
+        {
+            UpdateForceCapsule(grf0Capsule, RobotToUnityPos((float3)cop0), RobotToUnityPos((float3)grf0));
+            UpdateForceCapsule(grf1Capsule, RobotToUnityPos((float3)cop1), RobotToUnityPos((float3)grf1));
+        }
+        else
+        {
+            if (grf0Capsule != null) grf0Capsule.localScale = Vector3.zero;
+            if (grf1Capsule != null) grf1Capsule.localScale = Vector3.zero;
+        }
 
-        // Update Goal Trajectory
+        // Update Goal Trajectories (Pelvis: Green, Trunk: Cyan)
+        bool hasPelvisGoal = math.lengthsq(goalSnapshot[0]) > 0.001f;
+        bool hasTrunkGoal = math.lengthsq(trunkSnapshot[0]) > 0.001f;
+
         for (int i = 0; i < GoalTrajSteps; i++)
+        {
             goalTrajectorySpheres[i].position = (Vector3)RobotToUnityPos((float3)goalSnapshot[i]);
+            goalTrajectorySpheres[i].gameObject.SetActive(hasPelvisGoal && showPelvisHorizon);
 
+            if (trunkTrajectorySpheres != null && i < trunkTrajectorySpheres.Length)
+            {
+                trunkTrajectorySpheres[i].position = (Vector3)RobotToUnityPos((float3)trunkSnapshot[i]);
+                trunkTrajectorySpheres[i].gameObject.SetActive(hasTrunkGoal && showTrunkHorizon);
+            }
+        }
+
+        if (targetPelvisMarker != null)
+        {
+            bool showP = hasPelvisGoal && showTargetPelvisMarker;
+            targetPelvisMarker.SetActive(showP);
+            if (showP)
+            {
+                targetPelvisMarker.transform.position = (Vector3)RobotToUnityPos((float3)goalSnapshot[0]);
+                targetPelvisMarker.transform.rotation = comTrackerVisual.rotation;
+                SetMarkerColor(targetPelvisMaterial, pelvisTunnelDeviation >= 0.0 ? DeviationColor(pelvisTunnelDeviation) : GoalTrajColor);
+            }
+        }
+        if (targetChestMarker != null)
+        {
+            bool showT = hasTrunkGoal && showTargetChestMarker;
+            targetChestMarker.SetActive(showT);
+            if (showT)
+            {
+                targetChestMarker.transform.position = (Vector3)RobotToUnityPos((float3)trunkSnapshot[0]);
+                targetChestMarker.transform.rotation = (endEffectorVisual != null && math.lengthsq(eeF.c3.xyz) > 0.001f)
+                    ? endEffectorVisual.rotation
+                    : comTrackerVisual.rotation;
+                SetMarkerColor(targetChestMaterial, trunkTunnelDeviation >= 0.0 ? DeviationColor(trunkTunnelDeviation) : GoalTrajColor);
+            }
+        }
+
+    }
+
+    private void OnGUI()
+    {
+        if (!isActive) return;
+
+        GUIStyle buttonStyle = new GUIStyle(GUI.skin.button)
+        {
+            fontSize = 32,
+            fontStyle = FontStyle.Bold
+        };
+
+        if (GUI.Button(new Rect(12f, 12f, 320f, 48f), showForceVisuals ? "Hide GRFs" : "Display GRFs", buttonStyle))
+        {
+            SetForceVisualsVisible(!showForceVisuals);
+        }
+
+        DrawViewLabel(sideViewCamera, "Side View");
+        DrawViewLabel(backViewCamera, "Back View");
+    }
+
+    // Labels a split-screen panel at its bottom left, above the trajectory progress bar.
+    private static void DrawViewLabel(Camera viewCamera, string text)
+    {
+        if (viewCamera == null) return;
+
+        GUIStyle labelStyle = new GUIStyle(GUI.skin.label)
+        {
+            fontSize = 30,
+            fontStyle = FontStyle.Bold,
+            alignment = TextAnchor.MiddleCenter,
+            normal = { textColor = Color.white }
+        };
+
+        Rect panel = viewCamera.pixelRect; // origin at bottom left, GUI origin is top left
+        Vector2 size = labelStyle.CalcSize(new GUIContent(text)) + new Vector2(16f, 8f);
+        Rect box = new Rect(panel.x + 12f, Screen.height - panel.y - size.y - 72f, size.x, size.y);
+
+        Color prevColor = GUI.color;
+        GUI.color = new Color(0f, 0f, 0f, 0.6f);
+        GUI.DrawTexture(box, Texture2D.whiteTexture);
+        GUI.color = prevColor;
+        GUI.Label(box, text, labelStyle);
     }
 
     // =========================================================
     // Helpers
     // =========================================================
+
+    // Continuous hue sweep: green on the path, yellow at the tunnel wall, red at twice the wall distance.
+    private static Color DeviationColor(double deviation)
+    {
+        float hue = Mathf.Lerp(1f / 3f, 0f, Mathf.Clamp01((float)deviation / 2f));
+        return Color.HSVToRGB(hue, 1f, 1f);
+    }
+
+    private static void SetMarkerColor(Material material, Color color)
+    {
+        color.a = BodyMarkerAlpha;
+        material.color = color;
+        if (material.HasProperty("_BaseColor")) material.SetColor("_BaseColor", color);
+    }
 
     private static float3 RobotToUnityPos(float3 v)
     {
@@ -349,6 +551,16 @@ public class RobotVisualizer : MonoBehaviour
 
         if (math.lengthsq(fwd_u) < 0.001f) return quaternion.identity;
         return quaternion.LookRotation(fwd_u, up_u);
+    }
+
+    public void SetForceVisualsVisible(bool visible)
+    {
+        showForceVisuals = visible;
+        if (!visible)
+        {
+            if (grf0Capsule != null) grf0Capsule.localScale = Vector3.zero;
+            if (grf1Capsule != null) grf1Capsule.localScale = Vector3.zero;
+        }
     }
 
     private void UpdateForceCapsule(Transform capsule, float3 anchor, float3 forceVector)
@@ -381,19 +593,24 @@ public class RobotVisualizer : MonoBehaviour
 
     private void GeneratePulleyVisuals(Transform root)
     {
-        pulleySpheres = new Transform[robot.FramePulleyPositions.Length];
-        
-        for (int i = 0; i < robot.FramePulleyPositions.Length; i++)
+        // Trunk pulleys are drawn only once their real positions are entered
+        int numTrunk = robot.HasTrunkCables ? robot.NumTrunkCables : 0;
+        int numPelvis = robot.FramePulleyPositions.Length;
+        pulleySpheres = new Transform[numPelvis + numTrunk];
+
+        for (int i = 0; i < pulleySpheres.Length; i++)
         {
+            bool isTrunk = i >= numPelvis;
             var sphere = GameObject.CreatePrimitive(PrimitiveType.Sphere);
-            sphere.name = $"Pulley_{i}";
+            sphere.name = isTrunk ? $"Trunk_Pulley_{i - numPelvis}" : $"Pulley_{i}";
             sphere.transform.SetParent(root);
             sphere.transform.localScale = new Vector3(0.1f, 0.1f, 0.1f);
-            
-            Destroy(sphere.GetComponent<Collider>());
-            sphere.GetComponent<Renderer>().material.color = Color.gray;
 
-            sphere.transform.position = (Vector3)RobotToUnityPos((float3)robot.FramePulleyPositions[i]);
+            Destroy(sphere.GetComponent<Collider>());
+            sphere.GetComponent<Renderer>().material.color = isTrunk ? TrunkTrajColor : Color.gray;
+
+            double3 position = isTrunk ? robot.TrunkFramePulleyPositions[i - numPelvis] : robot.FramePulleyPositions[i];
+            sphere.transform.position = (Vector3)RobotToUnityPos((float3)position);
             pulleySpheres[i] = sphere.transform;
         }
     }
@@ -436,39 +653,56 @@ public class RobotVisualizer : MonoBehaviour
     private void GenerateGoalTrajectoryVisuals(Transform root)
     {
         goalTrajectorySpheres = new Transform[GoalTrajSteps];
-        var trajRoot = new GameObject("Goal_Trajectory").transform;
+        trunkTrajectorySpheres = new Transform[GoalTrajSteps];
+        var trajRoot = new GameObject("Goal_Trajectories").transform;
         trajRoot.SetParent(root);
 
         // Attempt URP Unlit (fastest/cleanest), fallback to Standard
         var shader = Shader.Find("Universal Render Pipeline/Unlit") ?? Shader.Find("Standard");
-        var mat = new Material(shader);
 
-        // Setup Transparency (Works for both usually)
+        var pelvisMat = CreateTrajectoryMaterial(shader, GoalTrajColor);
+        var trunkMat = CreateTrajectoryMaterial(shader, TrunkTrajColor);
+
+        for (int i = 0; i < GoalTrajSteps; i++)
+        {
+            // Pelvis Sphere (Green)
+            var pSphere = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+            pSphere.name = $"Pelvis_Goal_Step_{i}";
+            pSphere.transform.SetParent(trajRoot);
+            Destroy(pSphere.GetComponent<Collider>());
+            pSphere.GetComponent<Renderer>().sharedMaterial = pelvisMat;
+            pSphere.transform.localScale = Vector3.one * GoalSphereDiameter;
+            pSphere.transform.position = Vector3.zero;
+            pSphere.SetActive(false);
+            goalTrajectorySpheres[i] = pSphere.transform;
+
+            // Trunk Sphere (Cyan)
+            var tSphere = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+            tSphere.name = $"Trunk_Goal_Step_{i}";
+            tSphere.transform.SetParent(trajRoot);
+            Destroy(tSphere.GetComponent<Collider>());
+            tSphere.GetComponent<Renderer>().sharedMaterial = trunkMat;
+            tSphere.transform.localScale = Vector3.one * GoalSphereDiameter;
+            tSphere.transform.position = Vector3.zero;
+            tSphere.SetActive(false);
+            trunkTrajectorySpheres[i] = tSphere.transform;
+        }
+    }
+
+    private static Material CreateTrajectoryMaterial(Shader shader, Color color)
+    {
+        var mat = new Material(shader);
         mat.SetFloat("_Surface", 1); // URP
         mat.SetFloat("_Mode", 3);    // Standard
         mat.SetInt("_SrcBlend", (int)UnityEngine.Rendering.BlendMode.SrcAlpha);
         mat.SetInt("_DstBlend", (int)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha);
         mat.SetInt("_ZWrite", 0);
         mat.EnableKeyword("_ALPHABLEND_ON");
-        mat.EnableKeyword("_SURFACE_TYPE_TRANSPARENT"); 
+        mat.EnableKeyword("_SURFACE_TYPE_TRANSPARENT");
         mat.renderQueue = 3000;
-
-        // Set Color (URP uses _BaseColor, Standard uses _Color)
-        mat.SetColor("_BaseColor", GoalTrajColor); 
-        mat.SetColor("_Color", GoalTrajColor);
-
-        for (int i = 0; i < GoalTrajSteps; i++)
-        {
-            var sphere = GameObject.CreatePrimitive(PrimitiveType.Sphere);
-            sphere.name = $"Goal_Step_{i}";
-            sphere.transform.SetParent(trajRoot);
-            
-            Destroy(sphere.GetComponent<Collider>());
-            sphere.GetComponent<Renderer>().sharedMaterial = mat; 
-            sphere.transform.localScale = Vector3.one * GoalSphereDiameter;
-            sphere.transform.position = Vector3.zero;
-            goalTrajectorySpheres[i] = sphere.transform;
-        }
+        mat.SetColor("_BaseColor", color);
+        mat.SetColor("_Color", color);
+        return mat;
     }
 
     private void StripPhysics(Transform root)

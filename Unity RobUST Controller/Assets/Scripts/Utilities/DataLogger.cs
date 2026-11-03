@@ -22,6 +22,11 @@ public class DataLogger
         public ForcePlateData FP2;
         public Wrench GoalWrench;
         public RBState GoalState;
+        public Wrench TrunkWrench;
+        public RBState TrunkGoalState;
+        public double PelvisDeviation;
+        public double TrunkDeviation;
+        public double ReferenceProgress;
     }
 
     private DataFrame[] _buffer;
@@ -50,9 +55,18 @@ public class DataLogger
     /// <summary>
     /// Records a frame into the buffer. This is thread-safe for a single writer.
     /// </summary>
-    public void Log(long timestamp_tick, in double4x4 comPose, in double4x4 eePose, 
-                    in ForcePlateData fp1, in ForcePlateData fp2, 
-                    in Wrench goalWrench, in RBState goalState)
+    /// <param name="goalWrench">Wrench applied to the pelvis by the pelvis cables</param>
+    /// <param name="goalState">Pelvis target</param>
+    /// <param name="trunkWrench">Wrench applied to the trunk by the trunk cables</param>
+    /// <param name="trunkGoalState">Trunk target</param>
+    /// <param name="pelvisDeviation">Pelvis tunnel deviation (1 = at the wall or band edge), -1 when not assisted</param>
+    /// <param name="trunkDeviation">Trunk tunnel deviation, -1 when not assisted</param>
+    /// <param name="referenceProgress">Reference progress along the movement, 0 to 1</param>
+    public void Log(long timestamp_tick, in double4x4 comPose, in double4x4 eePose,
+                    in ForcePlateData fp1, in ForcePlateData fp2,
+                    in Wrench goalWrench, in RBState goalState,
+                    in Wrench trunkWrench, in RBState trunkGoalState,
+                    double pelvisDeviation, double trunkDeviation, double referenceProgress)
     {
         if (_cursor >= _maxFrames) return; 
 
@@ -66,6 +80,11 @@ public class DataLogger
         frame.FP2 = fp2;
         frame.GoalWrench = goalWrench;
         frame.GoalState = goalState;
+        frame.TrunkWrench = trunkWrench;
+        frame.TrunkGoalState = trunkGoalState;
+        frame.PelvisDeviation = pelvisDeviation;
+        frame.TrunkDeviation = trunkDeviation;
+        frame.ReferenceProgress = referenceProgress;
 
         _cursor++;
     }
@@ -100,7 +119,10 @@ public class DataLogger
                 sb.Append("FP2_Fx,FP2_Fy,FP2_Fz,FP2_CoPx,FP2_CoPy,FP2_CoPz,");
                 sb.Append("Goal_Fx,Goal_Fy,Goal_Fz,Goal_Tx,Goal_Ty,Goal_Tz,");
                 // RBState fields: p (position), th (euler), v (linear vel), w (angular vel)
-                sb.Append("Goal_Px,Goal_Py,Goal_Pz,Goal_Ex,Goal_Ey,Goal_Ez,Goal_Vx,Goal_Vy,Goal_Vz,Goal_Wx,Goal_Wy,Goal_Wz"); 
+                sb.Append("Goal_Px,Goal_Py,Goal_Pz,Goal_Ex,Goal_Ey,Goal_Ez,Goal_Vx,Goal_Vy,Goal_Vz,Goal_Wx,Goal_Wy,Goal_Wz,");
+                sb.Append("Trunk_Fx,Trunk_Fy,Trunk_Fz,Trunk_Tx,Trunk_Ty,Trunk_Tz,");
+                sb.Append("TrunkGoal_Px,TrunkGoal_Py,TrunkGoal_Pz,TrunkGoal_Ex,TrunkGoal_Ey,TrunkGoal_Ez,TrunkGoal_Vx,TrunkGoal_Vy,TrunkGoal_Vz,TrunkGoal_Wx,TrunkGoal_Wy,TrunkGoal_Wz,");
+                sb.Append("Pelvis_Deviation,Trunk_Deviation,Reference_Progress");
                 
                 writer.WriteLine(sb.ToString());
 
@@ -125,6 +147,14 @@ public class DataLogger
                     AppendVec3(sb, f.GoalState.th);
                     AppendVec3(sb, f.GoalState.v);
                     AppendVec3(sb, f.GoalState.w);
+
+                    AppendVec3(sb, f.TrunkWrench.Force); AppendVec3(sb, f.TrunkWrench.Torque);
+                    AppendVec3(sb, f.TrunkGoalState.p);
+                    AppendVec3(sb, f.TrunkGoalState.th);
+                    AppendVec3(sb, f.TrunkGoalState.v);
+                    AppendVec3(sb, f.TrunkGoalState.w);
+
+                    sb.Append($"{f.PelvisDeviation:F5},{f.TrunkDeviation:F5},{f.ReferenceProgress:F5}");
 
                     writer.WriteLine(sb.ToString());
                 }
