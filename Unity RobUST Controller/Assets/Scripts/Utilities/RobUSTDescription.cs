@@ -92,19 +92,16 @@ public sealed class RobUSTDescription
 
         // TODO(EE cables): replace with the measured EE pulley positions. These placeholders
         // copy the four top CoM pulleys so the solver has a plausible geometry for offline testing.
-        new double3(-0.576835048372789, 2.57648944314966, 0.252733189583757),   // 8: Front-Right Middle (placeholder)
-        new double3(-0.588436088357761, 0.0273606629681548, 0.182261108739911),  // 9: Front-Left Middle (placeholder)
-        new double3(1.18955071881626, 0.0229493275829191, 0.264120148165004),    // 10: Back-Left Middle (placeholder)
-        new double3(1.19164684688485, 2.58195169592441, 0.33072052196806)        // 11: Back-Right Middle (placeholder)
+        new double3(-0.486120903658954, 2.58981983174584, -0.531796026293604),   // 8: Front-Right Middle (Motor 9)
+        new double3(-0.48663714152053, 0.0487693384855197, -0.586767868757462),  // 9: Front-Left Middle (Motor 6)
+        new double3(1.15470589230612, 0.0394736321747686, -0.50825132500871),    // 10: Back-Left Middle (Motor 3)
+        new double3(1.16993521721218, 2.58692335871659, -0.45345177433347)       // 11: Back-Right Middle (Motor 12)
     };
 
     // Mapping from solver index to motor driver index for the full set
     // Corresponds to the order in AllPulleyPositions
     // motor mapping is: 10, 5, 4, 11, 8, 7, 2, 13
-    // If we change to the middle four motors, the mapping is: _, _, _, _, 8, 7, 2, 13
-    // TODO(EE cables): replace the four -1 with the EE motor driver indices (0-13).
-    // Until then, 4 and 12 cables are refused.
-    public static readonly int[] FullMotorMapping = new int[] { 9, 4, 3, 10, 7, 6, 1, 12, -1, -1, -1, -1 };
+    public static readonly int[] FullMotorMapping = new int[] { 9, 4, 3, 10, 7, 6, 1, 12, 8, 5, 2, 11}; // Last four indices are for mid/trunk level
 
     // Which entries of AllPulleyPositions and FullMotorMapping belong to each body
     private static readonly int[] CoMCableIndices = new int[] { 0, 1, 2, 3, 4, 5, 6, 7 };
@@ -127,10 +124,10 @@ public sealed class RobUSTDescription
         double3 front_left_correction  = new double3(-0.03, -0.03, -0.01);
         double3 front_right_correction = new double3(-0.03,  0.03, -0.01);
         // vive tracker jig readings:
-        FP_BackLeft   = new double3( 0.5385, 0.5793, -0.9520) + back_left_correction;
-        FP_BackRight  = new double3( 0.5234, 1.1350, -0.9463) + back_right_correction;
-        FP_FrontLeft  = new double3(-0.3202, 0.5510, -0.9525) + front_left_correction;
-        FP_FrontRight = new double3(-0.3341, 1.1077, -0.9458) + front_right_correction;
+        FP_BackLeft   = new double3( 0.853111207232777, 0.969593464804732, -1.68039029844029) + back_left_correction;
+        FP_BackRight  = new double3( 0.861958359549939, 1.57014313585518, -1.66494216707722) + back_right_correction;
+        FP_FrontLeft  = new double3(-0.0576879108823826, 0.986933851920689, -1.72241844826073) + front_left_correction;
+        FP_FrontRight = new double3(-0.0442011178637173, 1.58938752838676, -1.70847242495829) + front_right_correction;
         FloorZ = (FP_BackLeft.z + FP_BackRight.z + FP_FrontLeft.z + FP_FrontRight.z) / 4.0;
         
         NumCoMCables = CoMCableIndices.Length;

@@ -65,10 +65,13 @@ public class RobotController : MonoBehaviour
     [SerializeField] private string comTrajectoryCsvName = "SitToWalk_GPR_Pelvis_NoVR_normalized.csv";
     [Tooltip("Filename of the EE GPR trajectory CSV located in Assets/Scripts.")]
     [SerializeField] private string eeTrajectoryCsvName = "SitToWalk_GPR_Trunk_NoVR_normalized.csv";
-    [Tooltip("Target duration of the movement [s]. IMPEDANCE plays the target over this time. ASSIST_AS_NEEDED trains to this pace once the CoM starts moving. NoVR subjects averaged 0.79 s.")]
+    [Tooltip("Target duration of the movement [s]. IMPEDANCE and ASSIST_AS_NEEDED play from the position captured when Space starts the trial. NoVR subjects averaged 0.79 s.")]
     [SerializeField] private double stsDuration = 2.0;
     [Tooltip("Subject leg length: CoM tracker to floor while standing [m]. Scales AP/ML and, with the seated CoM height, sets the vertical rise.")]
     [SerializeField] private double userLegLength = 1.07;
+
+    // Measured floor-to-seat height [m]. The pelvis offset is captured live at each trial start.
+    private const double chairHeight = 0.4318;
 
     // Trajectory buffers (Zero-allocation during runtime)
     // Robot-frame fractions: x/y of leg length, z of rise height. Velocities are per unit tau.
@@ -82,7 +85,6 @@ public class RobotController : MonoBehaviour
     private const double EEMaxForceFraction = 0.10;
     private const double Gravity = 9.81; // [m/s^2]
 
-    private const double MinRiseHeight = 0.1; // below this the subject is not seated [m]
     private const double MaxRestartDrift = 0.10; // allowed distance from the last seated position on restart [m]
     private const double MockSwayAmplitude = 0.10; // [m]
     private const double MockSlowdown = 1.25; // virtual subject runs late, so it falls behind the pacer
@@ -93,12 +95,15 @@ public class RobotController : MonoBehaviour
     private double3 seatedCoMPos_RF = double3.zero;
     private double3 seatedEEPos_RF = double3.zero;
     private volatile bool isSeatedPoseValid = false;
-    private double riseHeight = MinRiseHeight; // standing minus seated CoM height [m], set when a trajectory starts
+    private double riseHeight = 0.0; // vertical scale [m], set when a trajectory starts
     private double trajectoryElapsedTime = 0.0;
     private volatile bool trajectoryTriggered = false;
     private volatile bool isTrajectoryPaused = false;
     private volatile bool isReplayPending = false; // reset to TRANSPARENT, and Space returns to replayControlMode
     private CONTROL_MODE replayControlMode = CONTROL_MODE.IMPEDANCE;
+    private float countdownEndTime = -1f;
+    private bool isCountingDown;
+    private CONTROL_MODE countdownMode;
     private bool isTrackerMockMode = false;
     private double4x4 mockEEPose_RF;
     private double4x4 mockComPose_RF;
@@ -304,11 +309,29 @@ public class RobotController : MonoBehaviour
         }
     }
 
+    private void LateUpdate()
+    {
+        if (!isCountingDown) return;
+        if (currentControlMode != countdownMode)
+        {
+            isCountingDown = false;
+            return;
+        }
+        if (Time.unscaledTime < countdownEndTime) return;
+
+        isCountingDown = false;
+        bool replay = currentControlMode == CONTROL_MODE.TRANSPARENT && isReplayPending;
+        isReplayPending = false;
+        StartTrajectory(); // The control loop captures the live poses when this starts.
+        if (replay) currentControlMode = replayControlMode;
+    }
+
     // Changing mode ends any trial. The seated pose is dropped so that no old target is restored.
     private void SetControlMode(CONTROL_MODE mode)
     {
         if (mode == currentControlMode) return;
 
+        isCountingDown = false;
         isTrajectoryActive = false;
         isTrajectoryPaused = false;
         trajectoryTriggered = false;
@@ -333,21 +356,18 @@ public class RobotController : MonoBehaviour
 
     public void TriggerOrToggleTrajectory()
     {
-        if (currentControlMode == CONTROL_MODE.TRANSPARENT && isReplayPending)
+        if (isCountingDown) return;
+        if ((currentControlMode == CONTROL_MODE.TRANSPARENT && isReplayPending)
+            || (!isTrajectoryActive && (currentControlMode == CONTROL_MODE.IMPEDANCE
+                || currentControlMode == CONTROL_MODE.ASSIST_AS_NEEDED)))
         {
-            isReplayPending = false;
-            StartTrajectory();
-            currentControlMode = replayControlMode;
-            Debug.Log($"[RobotController] Sit-to-Walk Trajectory Replayed in {replayControlMode} mode.");
+            countdownMode = currentControlMode;
+            countdownEndTime = Time.unscaledTime + 3f;
+            isCountingDown = true;
         }
         else if (currentControlMode != CONTROL_MODE.IMPEDANCE && currentControlMode != CONTROL_MODE.ASSIST_AS_NEEDED)
         {
             Debug.LogWarning($"[RobotController] Spacebar pressed, but robot is currently in {currentControlMode} mode. Press 'I' for IMPEDANCE or 'A' for ASSIST_AS_NEEDED first.");
-        }
-        else if (!isTrajectoryActive)
-        {
-            StartTrajectory();
-            Debug.Log($"[RobotController] Sit-to-Walk Trajectory Started in {currentControlMode} mode.");
         }
         else if (currentControlMode == CONTROL_MODE.IMPEDANCE && trajectoryElapsedTime < stsDuration)
         {
@@ -366,6 +386,8 @@ public class RobotController : MonoBehaviour
     /// </summary>
     public void ResetTrajectory()
     {
+        isCountingDown = false;
+        countdownEndTime = -1f;
         if (!isTrajectoryActive || (currentControlMode != CONTROL_MODE.IMPEDANCE && currentControlMode != CONTROL_MODE.ASSIST_AS_NEEDED))
         {
             return;
@@ -383,19 +405,32 @@ public class RobotController : MonoBehaviour
         currentControlMode = CONTROL_MODE.TRANSPARENT;
     }
 
-    // Captures the seated pose for a new trial, or cancels the trial if the subject is not seated.
-    private bool TryBeginTrial(in double3 comPos, in double3 eePos)
+    // Captures the starting pose once and validates the trajectory scale.
+    private bool TryBeginTrial(in double3 comPos, in double3 eePos, bool checkRestartDrift = true)
     {
         trajectoryTriggered = false;
 
-        double seatedCoMHeight = comPos.z - robotDescription.FloorZ;
-        double rise = userLegLength - seatedCoMHeight;
-        bool hasDrifted = isSeatedPoseValid && math.distance(comPos, seatedCoMPos_RF) > MaxRestartDrift;
-        if (rise < MinRiseHeight || hasDrifted)
+        double liveSeatedCoMHeight = comPos.z - robotDescription.FloorZ;
+        bool hasDrifted = checkRestartDrift && isSeatedPoseValid && math.distance(comPos, seatedCoMPos_RF) > MaxRestartDrift;
+        if (hasDrifted)
         {
-            Debug.LogWarning($"[RobotController] Trial not started: subject is not seated (CoM height {seatedCoMHeight:F3}m, leg length {userLegLength:F3}m).");
+            Debug.LogWarning("[RobotController] Trial not started: position is too far from the previous impedance start.");
             isTrajectoryActive = false;
             // A hold at the old seated pose would pull on a subject who is still up
+            if (isSeatedPoseValid) ReleaseToTransparent();
+            return false;
+        }
+
+        // Measure once from this trial's live pose; never update the offset during playback.
+        double pelvisTrackerHeightAboveSeat = liveSeatedCoMHeight - chairHeight;
+        double seatedCoMHeight = chairHeight + pelvisTrackerHeightAboveSeat;
+        double rise = userLegLength - seatedCoMHeight;
+        if (!math.isfinite(chairHeight) || chairHeight <= 0.0
+            || !math.isfinite(pelvisTrackerHeightAboveSeat) || pelvisTrackerHeightAboveSeat < 0.0
+            || !math.isfinite(rise) || rise <= 0.0)
+        {
+            Debug.LogWarning($"[RobotController] Trial not started: invalid trajectory scale. Chair height {chairHeight:F4}m, captured pelvis height {seatedCoMHeight:F3}m, leg-length scale {userLegLength:F3}m, rise {rise:F3}m. The pelvis must be at or above the seat and the calculated rise must be positive.");
+            isTrajectoryActive = false;
             if (isSeatedPoseValid) ReleaseToTransparent();
             return false;
         }
@@ -527,7 +562,7 @@ public class RobotController : MonoBehaviour
 
 
 
-            // Debug.Log($"comPose_RF: {comPose_RF.c3}");
+            //Debug.Log($"eePose_RF: {eePose_RF.c3}");
 
             // FP already in robot frame
             forcePlateManager.GetForcePlateData(0, out ForcePlateData fp0);
@@ -628,8 +663,9 @@ public class RobotController : MonoBehaviour
                 case CONTROL_MODE.ASSIST_AS_NEEDED:
                     if (trajectoryTriggered)
                     {
-                        // A refused start keeps this tick's tensions and takes no new target
-                        if (!TryBeginTrial(comPose_RF.c3.xyz, eePose_RF.c3.xyz)) break;
+                        // Capture both live positions once for each start, including replay. Body
+                        // movement since the previous trial must not reject or re-anchor this path.
+                        if (!TryBeginTrial(comPose_RF.c3.xyz, eePose_RF.c3.xyz, checkRestartDrift: false)) break;
                         trajectoryElapsedTime = 0.0;
                     }
 
@@ -962,6 +998,18 @@ public class RobotController : MonoBehaviour
 
     private void OnGUI()
     {
+        if (isCountingDown || (isTrajectoryActive && Time.unscaledTime < countdownEndTime + 0.5f))
+        {
+            GUIStyle countdownStyle = new GUIStyle(GUI.skin.label)
+            {
+                alignment = TextAnchor.MiddleCenter,
+                fontSize = 64,
+                fontStyle = FontStyle.Bold,
+                normal = { textColor = Color.white }
+            };
+            string text = isCountingDown ? Mathf.Max(1, Mathf.CeilToInt(countdownEndTime - Time.unscaledTime)).ToString() : "Go!";
+            GUI.Label(new Rect(0, Screen.height / 2f - 50f, Screen.width, 100f), text, countdownStyle);
+        }
         if (currentControlMode != CONTROL_MODE.IMPEDANCE && currentControlMode != CONTROL_MODE.ASSIST_AS_NEEDED) return;
 
         float trackWidth = 240f;

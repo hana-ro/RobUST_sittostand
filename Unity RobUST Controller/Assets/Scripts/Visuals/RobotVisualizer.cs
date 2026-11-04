@@ -480,7 +480,7 @@ public class RobotVisualizer : MonoBehaviour
 
         GUIStyle buttonStyle = new GUIStyle(GUI.skin.button)
         {
-            fontSize = 32,
+            fontSize = 24,
             fontStyle = FontStyle.Bold
         };
 
@@ -500,7 +500,7 @@ public class RobotVisualizer : MonoBehaviour
 
         GUIStyle labelStyle = new GUIStyle(GUI.skin.label)
         {
-            fontSize = 30,
+            fontSize = 22,
             fontStyle = FontStyle.Bold,
             alignment = TextAnchor.MiddleCenter,
             normal = { textColor = Color.white }
@@ -508,7 +508,7 @@ public class RobotVisualizer : MonoBehaviour
 
         Rect panel = viewCamera.pixelRect; // origin at bottom left, GUI origin is top left
         Vector2 size = labelStyle.CalcSize(new GUIContent(text)) + new Vector2(16f, 8f);
-        Rect box = new Rect(panel.x + 12f, Screen.height - panel.y - size.y - 72f, size.x, size.y);
+        Rect box = new Rect(panel.x + 12f, Screen.height - panel.y - size.y - 24f, size.x, size.y);
 
         Color prevColor = GUI.color;
         GUI.color = new Color(0f, 0f, 0f, 0.6f);
