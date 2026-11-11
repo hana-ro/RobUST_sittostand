@@ -17,10 +17,10 @@ public class TrackerManager : MonoBehaviour
 
     [Header("Tracker Serial Numbers")]
     [Tooltip("Serial number for the Center of Mass (CoM) tracker.")]
-    public string comTrackerSerial = "LHR-FFFFFFFF"; 
+    [Label("CoM Tracker Serial")] public string comTrackerSerial = "LHR-FFFFFFFF"; 
 
-    [Tooltip("Serial number for the End-Effector tracker.")]
-    public string endEffectorSerial = "LHR-FFFFFFFF";
+    [Tooltip("Serial number for the EE (trunk) tracker.")]
+    [Label("EE Tracker Serial"), UnityEngine.Serialization.FormerlySerializedAs("endEffectorSerial")] public string eeTrackerSerial = "LHR-FFFFFFFF";
 
     [Tooltip("Serial number for the Frame tracker, which defines the world origin.")]
     public string frameTrackerSerial = "LHR-FFFFFFFF";
@@ -31,13 +31,13 @@ public class TrackerManager : MonoBehaviour
     
     // Indices for the trackers
     private uint comTrackerIndex = OpenVR.k_unTrackedDeviceIndexInvalid;
-    private uint endEffectorIndex = OpenVR.k_unTrackedDeviceIndexInvalid;
+    private uint eeTrackerIndex = OpenVR.k_unTrackedDeviceIndexInvalid;
     private uint frameTrackerIndex = OpenVR.k_unTrackedDeviceIndexInvalid;
 
     // Thread-safe data storage
     private readonly object dataLock = new object();
     private TrackerData comTrackerData = new TrackerData();
-    private TrackerData endEffectorData = new TrackerData();
+    private TrackerData eeTrackerData = new TrackerData();
     private TrackerData frameTrackerData = new TrackerData();
 
     // High-frequency update thread
@@ -90,7 +90,7 @@ public class TrackerManager : MonoBehaviour
     /// </summary>
     private bool FindAllTrackers()
     {
-        comTrackerIndex = endEffectorIndex = frameTrackerIndex = OpenVR.k_unTrackedDeviceIndexInvalid;
+        comTrackerIndex = eeTrackerIndex = frameTrackerIndex = OpenVR.k_unTrackedDeviceIndexInvalid;
         var buffer = new System.Text.StringBuilder((int)OpenVR.k_unMaxPropertyStringSize);
         
         for (uint deviceId = 0; deviceId < OpenVR.k_unMaxTrackedDeviceCount; deviceId++)
@@ -112,10 +112,10 @@ public class TrackerManager : MonoBehaviour
                 comTrackerIndex = deviceId;
                 Debug.Log($"--> Matched CoM tracker: {serial}");
             }
-            else if (string.Equals(serial, endEffectorSerial, StringComparison.OrdinalIgnoreCase))
+            else if (string.Equals(serial, eeTrackerSerial, StringComparison.OrdinalIgnoreCase))
             {
-                endEffectorIndex = deviceId;
-                Debug.Log($"--> Matched End-Effector tracker: {serial}");
+                eeTrackerIndex = deviceId;
+                Debug.Log($"--> Matched EE tracker: {serial}");
             }
             else if (string.Equals(serial, frameTrackerSerial, StringComparison.OrdinalIgnoreCase))
             {
@@ -131,9 +131,9 @@ public class TrackerManager : MonoBehaviour
             Debug.LogError($"CoM tracker '{comTrackerSerial}' not found.", this);
             valid = false;
         }
-        if (endEffectorIndex == OpenVR.k_unTrackedDeviceIndexInvalid)
+        if (eeTrackerIndex == OpenVR.k_unTrackedDeviceIndexInvalid)
         {
-            Debug.LogError($"End-effector tracker '{endEffectorSerial}' not found.", this);
+            Debug.LogError($"EE tracker '{eeTrackerSerial}' not found.", this);
             valid = false;
         }
         if (frameTrackerIndex == OpenVR.k_unTrackedDeviceIndexInvalid)
@@ -168,8 +168,8 @@ public class TrackerManager : MonoBehaviour
             {
                 if (comTrackerIndex != OpenVR.k_unTrackedDeviceIndexInvalid && trackedDevicePoses[comTrackerIndex].bPoseIsValid)
                     UpdateMatrixFromOpenVR(trackedDevicePoses[comTrackerIndex].mDeviceToAbsoluteTracking, ref comTrackerData.PoseMatrix);
-                if (endEffectorIndex != OpenVR.k_unTrackedDeviceIndexInvalid && trackedDevicePoses[endEffectorIndex].bPoseIsValid)
-                    UpdateMatrixFromOpenVR(trackedDevicePoses[endEffectorIndex].mDeviceToAbsoluteTracking, ref endEffectorData.PoseMatrix);
+                if (eeTrackerIndex != OpenVR.k_unTrackedDeviceIndexInvalid && trackedDevicePoses[eeTrackerIndex].bPoseIsValid)
+                    UpdateMatrixFromOpenVR(trackedDevicePoses[eeTrackerIndex].mDeviceToAbsoluteTracking, ref eeTrackerData.PoseMatrix);
                 if (frameTrackerIndex != OpenVR.k_unTrackedDeviceIndexInvalid && trackedDevicePoses[frameTrackerIndex].bPoseIsValid)
                     UpdateMatrixFromOpenVR(trackedDevicePoses[frameTrackerIndex].mDeviceToAbsoluteTracking, ref frameTrackerData.PoseMatrix);
             }
@@ -198,11 +198,11 @@ public class TrackerManager : MonoBehaviour
         }
     }
 
-    public void GetEndEffectorTrackerData(out TrackerData data)
+    public void GetEETrackerData(out TrackerData data)
     {
         lock (dataLock)
         {
-            data = endEffectorData;
+            data = eeTrackerData;
         }
     }
 

@@ -13,11 +13,11 @@ using System.Globalization;
 public class DataLogger
 {
     // A Blittable-ish struct to keep memory contiguous.
-    // CoM = pelvis (CoM tracker, pelvis cables), EE = trunk (end-effector chest tracker, trunk cables).
+    // CoM = pelvis (CoM tracker, pelvis cables), EE = trunk (chest tracker, trunk cables).
     public struct DataFrame
     {
         public double Timestamp;
-        public double4x4 ComPoseRF;
+        public double4x4 CoMPoseRF;
         public double4x4 EEPoseRF;
         public ForcePlateData FP1;
         public ForcePlateData FP2;
@@ -31,7 +31,8 @@ public class DataLogger
         public RBState EEGoalState;
         public double CoMDeviation;
         public double EEDeviation;
-        public double ReferenceProgress;
+        public double CoMProgress;
+        public double EEProgress;
     }
 
     private DataFrame[] _buffer;
@@ -77,14 +78,15 @@ public class DataLogger
     /// <param name="eeSolverWrench">Wrench the commanded EE cable tensions apply (S * T)</param>
     /// <param name="eeMeasuredWrench">Wrench the measured EE cable tensions apply (S * T)</param>
     /// <param name="eeGoalState">EE target</param>
-    /// <param name="comDeviation">CoM distance from its pacer / 30 mm (1 = inner sphere, 2 = outer sphere), also measured when its cables are not driven; -1 outside an assist-as-needed trial or when untracked</param>
+    /// <param name="comDeviation">CoM sagittal distance from its path / 30 mm (1 = inner wall, 2 = outer wall), also measured when its cables are not driven; -1 outside an assist-as-needed trial or when untracked</param>
     /// <param name="eeDeviation">EE tunnel deviation, same rules as comDeviation</param>
-    /// <param name="referenceProgress">Reference progress along the movement, 0 to 1</param>
+    /// <param name="comProgress">CoM progress, 0 to 1: along its path in assist-as-needed, through the timed trajectory in impedance</param>
+    /// <param name="eeProgress">EE progress, same rules as comProgress</param>
     public void Log(long timestamp_tick, in double4x4 comPose, in double4x4 eePose,
                     in ForcePlateData fp1, in ForcePlateData fp2,
                     in Wrench comGoalWrench, in Wrench comSolverWrench, in Wrench comMeasuredWrench, in RBState comGoalState,
                     in Wrench eeGoalWrench, in Wrench eeSolverWrench, in Wrench eeMeasuredWrench, in RBState eeGoalState,
-                    double comDeviation, double eeDeviation, double referenceProgress)
+                    double comDeviation, double eeDeviation, double comProgress, double eeProgress)
     {
         if (_cursor >= _maxFrames) return;
 
@@ -93,7 +95,7 @@ public class DataLogger
 
         // Absolute UTC timestamp in seconds since Unix epoch
         frame.Timestamp = _anchorEpochSeconds + ((timestamp_tick - _anchorTick) * _tickToSeconds);
-        frame.ComPoseRF = comPose;
+        frame.CoMPoseRF = comPose;
         frame.EEPoseRF = eePose;
         frame.FP1 = fp1;
         frame.FP2 = fp2;
@@ -107,7 +109,8 @@ public class DataLogger
         frame.EEGoalState = eeGoalState;
         frame.CoMDeviation = comDeviation;
         frame.EEDeviation = eeDeviation;
-        frame.ReferenceProgress = referenceProgress;
+        frame.CoMProgress = comProgress;
+        frame.EEProgress = eeProgress;
 
         _cursor++;
     }
@@ -149,7 +152,7 @@ public class DataLogger
                 sb.Append("EE_Solver_Fx,EE_Solver_Fy,EE_Solver_Fz,EE_Solver_Tx,EE_Solver_Ty,EE_Solver_Tz,");
                 sb.Append("EE_Measured_Fx,EE_Measured_Fy,EE_Measured_Fz,EE_Measured_Tx,EE_Measured_Ty,EE_Measured_Tz,");
                 sb.Append("EE_Goal_Px,EE_Goal_Py,EE_Goal_Pz,EE_Goal_Ex,EE_Goal_Ey,EE_Goal_Ez,EE_Goal_Vx,EE_Goal_Vy,EE_Goal_Vz,EE_Goal_Wx,EE_Goal_Wy,EE_Goal_Wz,");
-                sb.Append("CoM_Deviation,EE_Deviation,Reference_Progress");
+                sb.Append("CoM_Deviation,EE_Deviation,CoM_Progress,EE_Progress");
 
                 writer.WriteLine(sb.ToString());
 
@@ -162,7 +165,7 @@ public class DataLogger
                     // G17 + InvariantCulture guarantees exact IEEE 754 round-trip (no mantissa truncation).
                     sb.Append(f.Timestamp.ToString("G17", CultureInfo.InvariantCulture)).Append(',');
 
-                    AppendMatrix(sb, f.ComPoseRF);
+                    AppendMatrix(sb, f.CoMPoseRF);
                     AppendMatrix(sb, f.EEPoseRF);
 
                     AppendVec3(sb, f.FP1.Force); AppendVec3(sb, f.FP1.CoP);
@@ -186,7 +189,7 @@ public class DataLogger
                     AppendVec3(sb, f.EEGoalState.v);
                     AppendVec3(sb, f.EEGoalState.w);
 
-                    sb.Append(f.CoMDeviation).Append(',').Append(f.EEDeviation).Append(',').Append(f.ReferenceProgress);
+                    sb.Append(f.CoMDeviation).Append(',').Append(f.EEDeviation).Append(',').Append(f.CoMProgress).Append(',').Append(f.EEProgress);
 
                     writer.WriteLine(sb.ToString());
                 }

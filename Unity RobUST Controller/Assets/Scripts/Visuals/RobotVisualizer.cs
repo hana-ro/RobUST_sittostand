@@ -9,19 +9,19 @@ public class RobotVisualizer : MonoBehaviour
     public bool isActive = true;
 
     [Header("Tracker Prefabs")]
-    public Transform comTrackerVisual;
-    public Transform endEffectorVisual;
+    [Label("CoM Tracker Visual")] public Transform comTrackerVisual;
+    [Label("EE Tracker Visual"), UnityEngine.Serialization.FormerlySerializedAs("endEffectorVisual")] public Transform eeTrackerVisual;
     public Transform frameTrackerVisual;
 
     [Header("Body Markers (meters)")]
-    [Min(0.01f)] public float eeMarkerHeight = 0.25f;
+    [Min(0.01f), Label("EE Marker Height")] public float eeMarkerHeight = 0.25f;
     // [Tooltip("EE width, height, and depth in meters. Applied at startup.")]
     // public Vector3 eeMarkerSize = new Vector3(0.28f, 0.18f, 0.20f);
     [Tooltip("CoM width, height, and depth in meters. Applied at startup.")]
-    public Vector3 comMarkerSize = new Vector3(0.28f, 0.18f, 0.20f);
-    public Vector3 eeMarkerSize = new Vector3(0.28f, 0.18f, 0.20f);
-    public Color eeMarkerColor = new Color(0.2f, 0.65f, 1f, BodyMarkerAlpha);
-    public Color comMarkerColor = new Color(1f, 0.5f, 0.15f, BodyMarkerAlpha);
+    [Label("CoM Marker Size")] public Vector3 comMarkerSize = new Vector3(0.28f, 0.18f, 0.20f);
+    [Label("EE Marker Size")] public Vector3 eeMarkerSize = new Vector3(0.28f, 0.18f, 0.20f);
+    [Label("EE Marker Color")] public Color eeMarkerColor = new Color(0.2f, 0.65f, 1f, BodyMarkerAlpha);
+    [Label("CoM Marker Color")] public Color comMarkerColor = new Color(1f, 0.5f, 0.15f, BodyMarkerAlpha);
     private const float BodyMarkerAlpha = 0.35f;
 
     [Header("Trajectory Markers")]
@@ -30,9 +30,9 @@ public class RobotVisualizer : MonoBehaviour
     [Tooltip("Toggle visibility of the target EE marker.")]
     public bool showTargetEEMarker = true;
     [Tooltip("Toggle visibility of the target CoM marker.")]
-    public bool showTargetCoMMarker = true;
+    [Label("Show Target CoM Marker")] public bool showTargetCoMMarker = true;
     [Tooltip("Toggle visibility of the green CoM trajectory lookahead horizon spheres.")]
-    public bool showCoMHorizon = true;
+    [Label("Show CoM Horizon")] public bool showCoMHorizon = true;
     [Tooltip("Toggle visibility of the cyan EE trajectory lookahead horizon spheres.")]
     public bool showEEHorizon = true;
 
@@ -50,6 +50,14 @@ public class RobotVisualizer : MonoBehaviour
     [Tooltip("Back view view (Right Half). This one will track the robot center.")]
     public Camera backViewCamera;
     public Camera perspectiveCamera { get => backViewCamera; set => backViewCamera = value; }
+
+    // Latest CoM position in the robot frame, for other views.
+    public double3 CoMPosition { get; private set; }
+    // Latest CoM distance from its path (1 = inner wall), negative with no assist-as-needed trial running.
+    public double CoMDeviation { get; private set; } = -1.0;
+    // The same for the EE.
+    public double3 EEPosition { get; private set; }
+    public double EEDeviation { get; private set; } = -1.0;
 
     [Header("Force Plate Visual")]
     [Tooltip("Toggle display of the ground reaction forces.")]
@@ -95,7 +103,7 @@ public class RobotVisualizer : MonoBehaviour
     {
         // Validation
         if (comTrackerVisual == null ||
-            endEffectorVisual == null ||
+            eeTrackerVisual == null ||
             frameTrackerVisual == null ||
             (backViewCamera == null && perspectiveCamera == null) ||
             topViewCamera == null ||
@@ -106,7 +114,7 @@ public class RobotVisualizer : MonoBehaviour
         }
         robot = robotDescription;
         StripPhysics(comTrackerVisual);
-        StripPhysics(endEffectorVisual);
+        StripPhysics(eeTrackerVisual);
         StripPhysics(frameTrackerVisual);
         StripPhysics(backViewCamera.transform);
         StripPhysics(topViewCamera.transform);
@@ -146,7 +154,7 @@ public class RobotVisualizer : MonoBehaviour
         Vector3 comSize = new Vector3((float)robot.CoMMLDistance, comMarkerSize.y, (float)robot.CoMAPDistance);
         Vector3 eeSize = new Vector3((float)robot.EEMLDistance, eeMarkerHeight, (float)robot.EEAPDistance);
 
-        eeMarker = CreateBodyMarker("EE_Body", endEffectorVisual,
+        eeMarker = CreateBodyMarker("EE_Body", eeTrackerVisual,
             eeSize, shader, eeMarkerColor, out eeMarkerMaterial);
         comMarker = CreateBodyMarker("CoM_Body", comTrackerVisual,
             comSize, shader, comMarkerColor, out comMarkerMaterial);
@@ -335,7 +343,7 @@ public class RobotVisualizer : MonoBehaviour
     }
 
     /// <summary>
-    /// Pushes each segment's distance from its pacer (1 = inner sphere, 2 = outer sphere).
+    /// Pushes each segment's distance from its path (1 = inner wall, 2 = outer wall).
     /// Negative when that segment has no assist-as-needed trial running.
     /// </summary>
     public void PushTunnelDeviation(double comDeviation, double eeDeviation)
@@ -406,6 +414,11 @@ public class RobotVisualizer : MonoBehaviour
             }
         }
 
+        CoMPosition = comMat.c3.xyz;
+        CoMDeviation = comTunnelDeviation;
+        EEPosition = eeMat.c3.xyz;
+        EEDeviation = eeTunnelDeviation;
+
         // 1. Cast to float4x4 once (Visuals don't need double precision)
         float4x4 comF = (float4x4)comMat;
         float4x4 eeF = (float4x4)eeMat;
@@ -413,8 +426,8 @@ public class RobotVisualizer : MonoBehaviour
         comTrackerVisual.position = (Vector3)RobotToUnityPos(comF.c3.xyz);
         comTrackerVisual.rotation = (Quaternion)RobotToUnityRot(new quaternion(comF));
 
-        endEffectorVisual.position = (Vector3)RobotToUnityPos(eeF.c3.xyz);
-        endEffectorVisual.rotation = (Quaternion)RobotToUnityRot(new quaternion(eeF));
+        eeTrackerVisual.position = (Vector3)RobotToUnityPos(eeF.c3.xyz);
+        eeTrackerVisual.rotation = (Quaternion)RobotToUnityRot(new quaternion(eeF));
         
         // Frame (Always Origin)
         frameTrackerVisual.localPosition = Vector3.zero; 
@@ -465,8 +478,8 @@ public class RobotVisualizer : MonoBehaviour
             if (showT)
             {
                 targetEEMarker.transform.position = (Vector3)RobotToUnityPos((float3)eeSnapshot[0]);
-                targetEEMarker.transform.rotation = (endEffectorVisual != null && math.lengthsq(eeF.c3.xyz) > 0.001f)
-                    ? endEffectorVisual.rotation
+                targetEEMarker.transform.rotation = (eeTrackerVisual != null && math.lengthsq(eeF.c3.xyz) > 0.001f)
+                    ? eeTrackerVisual.rotation
                     : comTrackerVisual.rotation;
                 SetMarkerColor(targetEEMaterial, eeTunnelDeviation >= 0.0 ? DeviationColor(eeTunnelDeviation) : GoalTrajColor);
             }
@@ -521,8 +534,8 @@ public class RobotVisualizer : MonoBehaviour
     // Helpers
     // =========================================================
 
-    // Continuous hue sweep: green at the pacer, yellow at the inner sphere (force starts), red at the outer (maximum force).
-    private static Color DeviationColor(double deviation)
+    // Continuous hue sweep: green on the path, yellow at the inner wall (normal force starts), red at the outer (maximum force).
+    public static Color DeviationColor(double deviation)
     {
         float hue = Mathf.Lerp(1f / 3f, 0f, Mathf.Clamp01((float)deviation / 2f));
         return Color.HSVToRGB(hue, 1f, 1f);

@@ -41,7 +41,7 @@ public class ImpedanceController : BaseController<Wrench>
     /// Updates the controller with the latest sensor data and target state.
     /// Call this immediately before computeNextControl().
     /// </summary>
-    /// <param name="pose_RF">Current End-Effector pose in Robot Frame</param>
+    /// <param name="pose_RF">Current pose of the controlled body (CoM or EE) in Robot Frame</param>
     /// <param name="linVel_RF">Current Linear Velocity in Robot Frame [m/s]</param>
     /// <param name="angVel_RF">Current Angular Velocity in Robot Frame [rad/s]</param>
     /// <param name="target">The desired state (Position, Euler ZYX, Velocities)</param>
