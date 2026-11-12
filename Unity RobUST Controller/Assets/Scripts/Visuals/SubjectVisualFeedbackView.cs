@@ -10,6 +10,8 @@ public class SubjectVisualFeedbackView : MonoBehaviour
     [Tooltip("Largest share of the screen width and height the plot may fill, centred.")]
     [Range(0.2f, 1f)] public float plotSize = 0.8f;
     public float dotSize = 36f;
+    [Tooltip("Extra movement room at the top and right of the reference paths [cm], plus clearance for the tracking circle.")]
+    [Min(0f)] public float pathMarginCm = 10f;
     public Color pathColor = new Color(0.45f, 0.45f, 0.45f);
 
     private static readonly Color Ink = new Color(0.15f, 0.15f, 0.15f);
@@ -67,12 +69,19 @@ public class SubjectVisualFeedbackView : MonoBehaviour
         foreach (double3[] path in new[] { comPath, eePath })
             if (path != null)
                 foreach (double3 p in path) { min = math.min(min, ToCm(p)); max = math.max(max, ToCm(p)); }
+        // Keep the original 5 cm spacing on the left/bottom; add room only top/right.
         min -= 5f;
-        max += 5f;
+        max += math.max(5f, pathMarginCm);
 
-        // Same scale on both axes, so the paths keep their true shape, centred on the screen
-        float2 range = max - min;
-        pxPerCm = math.min(Screen.width * plotSize / range.x, Screen.height * plotSize / range.y);
+        // Reserve circle clearance only on the top/right, keeping equal axis scales.
+        // Bounds depend on the reference, so moving the tracker never rescales the plot.
+        float2 range = math.max(max - min, new float2(1f));
+        float circleClearancePx = math.max(0f, dotSize) * 0.5f + 8f;
+        float2 available = math.max(new float2(Screen.width, Screen.height) * plotSize
+            - circleClearancePx, new float2(1f));
+        pxPerCm = math.min(available.x / range.x, available.y / range.y);
+        max += circleClearancePx / pxPerCm;
+        range = max - min;
         float2 lo = new float2((Screen.width - range.x * pxPerCm) / 2f, (Screen.height + range.y * pxPerCm) / 2f); // bottom left
         origin_px = lo + new float2(-min.x, min.y) * pxPerCm;
         float2 hi = ToScreen(max); // top right
@@ -104,7 +113,9 @@ public class SubjectVisualFeedbackView : MonoBehaviour
         if (showEE) LiveDot(visualizer.EEPosition, visualizer.EEDeviation);
 
         GUI.color = Color.white;
-        string direction = showCoM && showEE ? "Follow the pelvis and trunk trajectories"
+        string direction = comPath == null && eePath == null ? "Select A or I, then press Space to capture a trajectory"
+            : controller.IsPostTrialTransparent ? "Move freely; return to sitting, then press Space"
+            : showCoM && showEE ? "Follow the pelvis and trunk trajectories"
             : showEE ? "Follow the trunk trajectory" : "Follow the pelvis trajectory";
         GUI.Label(new Rect(0, 0, Screen.width, hi.y), direction, directionStyle); // centred between the screen top and the arrow tip
 

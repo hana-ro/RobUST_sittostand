@@ -87,19 +87,18 @@ public class RobotController : MonoBehaviour
     private const double EETangentialForceFraction = 0.03;
     private const double Gravity = 9.81; // [m/s^2]
 
-    private const double MaxRestartDrift = 0.10; // allowed distance from the last seated position on restart [m]
     private const double MockPeakDeviation = 0.04; // [m], just past the inner wall, so the dot turns yellow
     private const double MockSlowdown = 1.25; // virtual subject moves slower than stsDuration
     private const double ControlFrequency = 100.0; // [Hz]
     private const int TrajectoryHorizonSteps = 10;
     private const int TunnelPreviewStep = 5; // spacing of the path preview ahead of the nearest point, in path points
     private const double ReleaseRampTime = 0.15; // [s], force ramp to zero after a body reaches the end of its path
-    private const double PreviewSeatedTolerance = 0.05; // [m], pelvis this far above the last seated height counts as up
 
     private double3 seatedCoMPos_RF = double3.zero;
     private double3 seatedEEPos_RF = double3.zero;
     private volatile bool isSeatedPoseValid = false;
-    private double riseHeight = 0.0; // vertical scale [m], set when a trajectory starts
+    private double riseHeight = 0.0; // vertical scale [m], captured on Space
+    private double trialLegLength; // horizontal scale captured with the path
     private double trajectoryElapsedTime = 0.0;
     private double comCompletedTime = -1.0, eeCompletedTime = -1.0; // trial time each body reached its path end, -1 before
     private volatile float shownProgress; // progress bar: the driven body's progress, the CoM's when both are driven
@@ -110,18 +109,20 @@ public class RobotController : MonoBehaviour
     private float countdownEndTime = -1f;
     private bool isCountingDown;
 
+    public bool IsPostTrialTransparent => currentControlMode == CONTROL_MODE.TRANSPARENT && isReplayPending && !isCountingDown;
+
     // Countdown text ("3", "2", "1", "Go!"), or null when none is showing.
     public string CountdownText =>
         isCountingDown ? Mathf.Max(1, Mathf.CeilToInt(countdownEndTime - Time.unscaledTime)).ToString()
         : isTrajectoryActive && Time.unscaledTime < countdownEndTime + 0.5f ? "Go!" : null;
 
-    // This trial's whole pelvis path in the robot frame, set when the trial starts. Null before the first trial.
+    // Captured on Space and retained after completion. Null before capture or after explicit mode changes.
     public double3[] CoMPath { get; private set; }
     // The same for the trunk; null without a trunk trajectory.
     public double3[] EEPath { get; private set; }
-    private double3[] comPreview, eePreview;
-    // The cables driven now: the running trial's, otherwise the Inspector setting.
-    public CABLE_CONFIG ActiveCables => isTrajectoryActive ? trialCableConfig : numCables;
+    // Display the captured trial's bodies until its reference is explicitly cleared.
+    public CABLE_CONFIG ActiveCables => CoMPath != null ? trialCableConfig : numCables;
+    private readonly object trialStateLock = new object();
     private CONTROL_MODE countdownMode;
     private bool isTrackerMockMode = false;
     private double4x4 mockEEPose_RF;
@@ -159,7 +160,7 @@ public class RobotController : MonoBehaviour
 
         if (!ValidateModules())
         {
-            enabled = false; 
+            enabled = false;
             return;
         }
 
@@ -202,7 +203,7 @@ public class RobotController : MonoBehaviour
             Debug.LogWarning("Failed to initialize ForcePlateManager.", this);
             isForcePlateEnabled = false;
         }
-        
+
         if (isLabviewControlEnabled)
         {
             tcpCommunicator.ConnectToServer();
@@ -289,7 +290,7 @@ public class RobotController : MonoBehaviour
 
     private void Update()
     {
-        CABLE_CONFIG cablesNow = isTrajectoryActive ? trialCableConfig : numCables;
+        CABLE_CONFIG cablesNow = ActiveCables;
         if (cablesNow != shownCableConfig)
         {
             visualizer.SetPulleysVisible(DrivesCoM(cablesNow), DrivesEE(cablesNow));
@@ -332,34 +333,44 @@ public class RobotController : MonoBehaviour
 
     private void LateUpdate()
     {
-        if (!isCountingDown) return;
-        if (currentControlMode != countdownMode)
+        lock (trialStateLock)
         {
-            isCountingDown = false;
-            return;
-        }
-        if (Time.unscaledTime < countdownEndTime) return;
+            if (!isCountingDown) return;
+            if (currentControlMode != countdownMode)
+            {
+                isCountingDown = false;
+                return;
+            }
+            if (Time.unscaledTime < countdownEndTime) return;
 
-        isCountingDown = false;
-        bool replay = currentControlMode == CONTROL_MODE.TRANSPARENT && isReplayPending;
-        isReplayPending = false;
-        StartTrajectory(); // The control loop captures the live poses when this starts.
-        if (replay) currentControlMode = replayControlMode;
+            isCountingDown = false;
+            bool replay = currentControlMode == CONTROL_MODE.TRANSPARENT && isReplayPending;
+            isReplayPending = false;
+            StartTrajectory(); // Uses the poses and paths already captured on Space.
+            if (replay) currentControlMode = replayControlMode;
+        }
     }
 
     // Changing mode ends any trial. The seated pose is dropped so that no old target is restored.
     private void SetControlMode(CONTROL_MODE mode)
     {
-        if (mode == currentControlMode) return;
+        lock (trialStateLock)
+        {
+            if (mode == currentControlMode && mode != CONTROL_MODE.TRANSPARENT) return;
 
-        isCountingDown = false;
-        isTrajectoryActive = false;
-        isTrajectoryPaused = false;
-        trajectoryTriggered = false;
-        isReplayPending = false;
-        isSeatedPoseValid = false;
-        trajectoryElapsedTime = 0.0;
-        currentControlMode = mode;
+            isCountingDown = false;
+            isTrajectoryActive = false;
+            isTrajectoryPaused = false;
+            trajectoryTriggered = false;
+            isReplayPending = false;
+            isSeatedPoseValid = false;
+            CoMPath = null;
+            EEPath = null;
+            countdownEndTime = -1f;
+            shownProgress = 0f;
+            trajectoryElapsedTime = 0.0;
+            currentControlMode = mode;
+        }
     }
 
     private void StartTrajectory()
@@ -367,9 +378,7 @@ public class RobotController : MonoBehaviour
         trajectoryElapsedTime = 0.0;
         isTrajectoryPaused = false;
         trajectoryTriggered = true;
-        // Fixed for the whole trial, so a change cannot add or drop a body mid-movement. Set before
-        // the trial goes active, so the control loop never reads the previous trial's cables.
-        trialCableConfig = numCables;
+        // Cable configuration and geometry were captured on Space.
         isTrajectoryActive = true;
         if (DrivesEE(trialCableConfig) && eeAssistController == null && currentControlMode == CONTROL_MODE.ASSIST_AS_NEEDED)
             Debug.LogWarning("[RobotController] EE assistance unavailable: the EE trajectory did not load. The EE cables stay at minimum tension.");
@@ -377,45 +386,52 @@ public class RobotController : MonoBehaviour
 
     public void TriggerOrToggleTrajectory()
     {
-        if (isCountingDown) return;
-        if ((currentControlMode == CONTROL_MODE.TRANSPARENT && isReplayPending)
-            || (!isTrajectoryActive && (currentControlMode == CONTROL_MODE.IMPEDANCE
-                || currentControlMode == CONTROL_MODE.ASSIST_AS_NEEDED)))
+        lock (trialStateLock)
         {
-            countdownMode = currentControlMode;
-            countdownEndTime = Time.unscaledTime + 3f;
-            isCountingDown = true;
-        }
-        else if (currentControlMode != CONTROL_MODE.IMPEDANCE && currentControlMode != CONTROL_MODE.ASSIST_AS_NEEDED)
-        {
-            Debug.LogWarning($"[RobotController] Spacebar pressed, but robot is currently in {currentControlMode} mode. Press 'I' for IMPEDANCE or 'A' for ASSIST_AS_NEEDED first.");
-        }
-        else if (currentControlMode == CONTROL_MODE.IMPEDANCE && trajectoryElapsedTime < stsDuration)
-        {
-            isTrajectoryPaused = !isTrajectoryPaused;
-            Debug.Log($"[RobotController] Sit-to-Walk Trajectory {(isTrajectoryPaused ? "Paused" : "Resumed")}.");
-        }
-        else
-        {
-            Debug.LogWarning("[RobotController] Trajectory is already playing or finished. Press 'R' to reset first.");
+            if (isCountingDown) return;
+            if ((currentControlMode == CONTROL_MODE.TRANSPARENT && isReplayPending)
+                || (!isTrajectoryActive && (currentControlMode == CONTROL_MODE.IMPEDANCE
+                    || currentControlMode == CONTROL_MODE.ASSIST_AS_NEEDED)))
+            {
+                if (!CaptureTrialOnSpace()) return;
+                countdownMode = currentControlMode;
+                countdownEndTime = Time.unscaledTime + 3f;
+                isCountingDown = true;
+            }
+            else if (currentControlMode != CONTROL_MODE.IMPEDANCE && currentControlMode != CONTROL_MODE.ASSIST_AS_NEEDED)
+            {
+                Debug.LogWarning($"[RobotController] Spacebar pressed, but robot is currently in {currentControlMode} mode. Press 'I' for IMPEDANCE or 'A' for ASSIST_AS_NEEDED first.");
+            }
+            else if (currentControlMode == CONTROL_MODE.IMPEDANCE && trajectoryElapsedTime < stsDuration)
+            {
+                isTrajectoryPaused = !isTrajectoryPaused;
+                Debug.Log($"[RobotController] Sit-to-Walk Trajectory {(isTrajectoryPaused ? "Paused" : "Resumed")}.");
+            }
+            else
+            {
+                Debug.LogWarning("[RobotController] Trajectory is already playing or finished. Press 'R' to reset first.");
+            }
         }
     }
 
     /// <summary>
     /// Ends the trial by going to TRANSPARENT, so the subject can sit down with no force on them.
-    /// The target bodies return to the seated position, and Space replays in the previous mode.
+    /// The captured paths remain visible, and Space captures a new trial in the previous mode.
     /// </summary>
     public void ResetTrajectory()
     {
-        isCountingDown = false;
-        countdownEndTime = -1f;
-        if (!isTrajectoryActive || (currentControlMode != CONTROL_MODE.IMPEDANCE && currentControlMode != CONTROL_MODE.ASSIST_AS_NEEDED))
+        lock (trialStateLock)
         {
-            return;
-        }
+            isCountingDown = false;
+            countdownEndTime = -1f;
+            if (!isTrajectoryActive || (currentControlMode != CONTROL_MODE.IMPEDANCE && currentControlMode != CONTROL_MODE.ASSIST_AS_NEEDED))
+            {
+                return;
+            }
 
-        ReleaseToTransparent();
-        Debug.Log("[RobotController] Reset to TRANSPARENT. Sit down, then press Space to play again.");
+            ReleaseToTransparent();
+            Debug.Log("[RobotController] Reset to TRANSPARENT. Sit down, then press Space to play again.");
+        }
     }
 
     // Goes to TRANSPARENT with the replay still available. The trial state is cleared on the control thread.
@@ -426,22 +442,35 @@ public class RobotController : MonoBehaviour
         currentControlMode = CONTROL_MODE.TRANSPARENT;
     }
 
-    // Captures the starting pose once and validates the trajectory scale.
-    private bool TryBeginTrial(in double3 comPos, in double3 eePos, bool checkRestartDrift = true)
+    // Read the latest tracker samples on Space, before showing the countdown.
+    private bool CaptureTrialOnSpace()
     {
-        trajectoryTriggered = false;
-
-        double liveSeatedCoMHeight = comPos.z - robotDescription.FloorZ;
-        bool hasDrifted = checkRestartDrift && isSeatedPoseValid && math.distance(comPos, seatedCoMPos_RF) > MaxRestartDrift;
-        if (hasDrifted)
+        double4x4 comPose = mockComPose_RF, eePose = mockEEPose_RF;
+        if (!isTrackerMockMode)
         {
-            Debug.LogWarning("[RobotController] Trial not started: position is too far from the previous impedance start.");
-            isTrajectoryActive = false;
-            // A hold at the old seated pose would pull on a subject who is still up
-            if (isSeatedPoseValid) ReleaseToTransparent();
+            trackerManager.GetCoMTrackerData(out TrackerData comData);
+            trackerManager.GetEETrackerData(out TrackerData eeData);
+            double4x4 frameInv = math.fastinverse(ToDouble4x4(robot_frame_tracker.PoseMatrix));
+            comPose = math.mul(frameInv, ToDouble4x4(comData.PoseMatrix));
+            eePose = math.mul(frameInv, ToDouble4x4(eeData.PoseMatrix));
+        }
+        if (math.lengthsq(comPose.c3.xyz) <= 0.001 || !math.all(math.isfinite(comPose.c3.xyz)))
+        {
+            Debug.LogWarning("[RobotController] Trial not captured: pelvis position is unavailable.");
             return false;
         }
+        if (math.lengthsq(eePose.c3.xyz) <= 0.001)
+            eePose = MakePose(comPose.c3.xyz + new double3(0, 0, 0.25), quaternion.RotateZ(-math.PI / 2));
+        if (!TryBeginTrial(comPose.c3.xyz, eePose.c3.xyz)) return false;
+        trialCableConfig = numCables;
+        shownProgress = 0f;
+        return true;
+    }
 
+    // Captures a new reference only in response to Space; returning to sitting never recalibrates it.
+    private bool TryBeginTrial(in double3 comPos, in double3 eePos)
+    {
+        double liveSeatedCoMHeight = comPos.z - robotDescription.FloorZ;
         // Measure once from this trial's live pose; never update the offset during playback.
         double pelvisTrackerHeightAboveSeat = liveSeatedCoMHeight - chairHeight;
         double seatedCoMHeight = chairHeight + pelvisTrackerHeightAboveSeat;
@@ -451,8 +480,6 @@ public class RobotController : MonoBehaviour
             || !math.isfinite(rise) || rise <= 0.0)
         {
             Debug.LogWarning($"[RobotController] Trial not started: invalid trajectory scale. Chair height {chairHeight:F4}m, captured pelvis height {seatedCoMHeight:F3}m, leg-length scale {userLegLength:F3}m, rise {rise:F3}m. The pelvis must be at or above the seat and the calculated rise must be positive.");
-            isTrajectoryActive = false;
-            if (isSeatedPoseValid) ReleaseToTransparent();
             return false;
         }
 
@@ -460,29 +487,18 @@ public class RobotController : MonoBehaviour
         seatedEEPos_RF = eePos;
         isSeatedPoseValid = true;
         riseHeight = rise;
+        trialLegLength = userLegLength;
         if (comTrajDisplacements != null) CoMPath = BuildPath(comTrajDisplacements, comPos, rise);
         EEPath = eeAssistController != null ? BuildPath(eeTrajDisplacements, eePos, rise) : null;
         //Debug.Log($"[RobotController] Seated CoM height {seatedCoMHeight:F3}m, leg length {userLegLength:F3}m, rise height {riseHeight:F3}m.");
         return true;
     }
 
-    // Before a trial, the paths it would get from the live pose, so the subject view shows them straight away.
-    // Reuses its own arrays; a trial builds new ones.
-    // Keeps the last path while the subject is up after a trial, until they sit back down.
-    private void PreviewPaths(in double3 comPos, in double3 eePos)
-    {
-        if (isSeatedPoseValid && comPos.z > seatedCoMPos_RF.z + PreviewSeatedTolerance) return;
-        double rise = userLegLength - (comPos.z - robotDescription.FloorZ);
-        if (!(rise > 0.0)) return;
-        if (comTrajDisplacements != null) CoMPath = comPreview = BuildPath(comTrajDisplacements, comPos, rise, comPreview);
-        EEPath = eeAssistController != null ? eePreview = BuildPath(eeTrajDisplacements, eePos, rise, eePreview) : null;
-    }
-
     // The whole reference path in the Robot Frame, scaled to this subject and starting at the seated position.
-    private double3[] BuildPath(double3[] displacements, in double3 origin, double rise, double3[] path = null)
+    private double3[] BuildPath(double3[] displacements, in double3 origin, double rise)
     {
-        double3 scale = new double3(userLegLength, userLegLength, rise);
-        path ??= new double3[displacements.Length];
+        double3 scale = new double3(trialLegLength, trialLegLength, rise);
+        double3[] path = new double3[displacements.Length];
         for (int i = 0; i < path.Length; i++) path[i] = origin + displacements[i] * scale;
         return path;
     }
@@ -549,7 +565,7 @@ public class RobotController : MonoBehaviour
     }
 
     /// <summary>
-    ///  This control loop is the main "driver" of one or more `Controller` instances. 
+    ///  This control loop is the main "driver" of one or more `Controller` instances.
     ///  It needs to grab the latest tracker data, update visuals, compute cable tensions, and send commands to LabVIEW.
     ///  a `Controller` functions more like a `Control Policy/Solver` here, with RobotController managing the data flow.
     /// </summary>
@@ -635,181 +651,179 @@ public class RobotController : MonoBehaviour
             if (math.abs(netForce.z) > 1e-3) // Handle division by zero
                 netCoP = (fp0.CoP * fp0.Force.z + fp1.CoP * fp1.Force.z) / netForce.z;
             ForcePlateData netFPData = new ForcePlateData(netForce, netCoP);
-            
+
             filter_10Hz.Update(comPose_RF, eePose_RF, netFPData);
 
-            double comDeviation = -1.0;
-            double eeDeviation = -1.0;
-            double comProgress = 0.0; // along the path (assist-as-needed) or through the timed trajectory (impedance), 0 to 1
-            double eeProgress = 0.0;
-            Wrench comGoalWrench = zeroWrench; // what the controller requested, for logging
-            Wrench eeGoalWrench = zeroWrench;
-            CONTROL_MODE activeControlMode = currentControlMode;
-            // A running trial keeps the cables it started with. Undriven cables log zero tension.
-            CABLE_CONFIG activeCables = isTrajectoryActive ? trialCableConfig : numCables;
-            bool assistCoM = DrivesCoM(activeCables);
-            bool assistEE = DrivesEE(activeCables);
-            if (!assistCoM) com_tensions = zeroCoMTensions;
-            if (!assistEE) ee_tensions = zeroEETensions;
-
-            switch (activeControlMode)
+            lock (trialStateLock)
             {
-                case CONTROL_MODE.OFF:
-                    motor_tension_command.Clear();
-                    com_tensions = zeroCoMTensions;
-                    ee_tensions = zeroEETensions;
-                    visualizer.PushGoalTrajectories(ReadOnlySpan<RBState>.Empty, ReadOnlySpan<RBState>.Empty);
-                    break;
-                case CONTROL_MODE.TRANSPARENT:
-                    motor_tension_command.Clear();
-                    // 8 CoM cables hold a zero wrench (8, 12)
-                    CommandCoMCables(assistCoM, comPose_RF, zeroWrench, ref com_tensions, motor_tension_command);
-                    if (assistEE)
-                    {
-                        // Four EE cables cannot hold a zero wrench, so they hold a light fixed tension (4, 12)
-                        ee_tensions = fixedEETensions;
-                        MapTensionsToMotors(ee_tensions, robotDescription.EESolverToMotorMap, motor_tension_command);
-                    }
+                double comDeviation = -1.0;
+                double eeDeviation = -1.0;
+                double comProgress = 0.0; // along the path (assist-as-needed) or through the timed trajectory (impedance), 0 to 1
+                double eeProgress = 0.0;
+                Wrench comGoalWrench = zeroWrench; // what the controller requested, for logging
+                Wrench eeGoalWrench = zeroWrench;
+                CONTROL_MODE activeControlMode = currentControlMode;
+                // A running trial keeps the cables it started with. Undriven cables log zero tension.
+                CABLE_CONFIG activeCables = ActiveCables;
+                bool assistCoM = DrivesCoM(activeCables);
+                bool assistEE = DrivesEE(activeCables);
+                if (!assistCoM) com_tensions = zeroCoMTensions;
+                if (!assistEE) ee_tensions = zeroEETensions;
 
-                    if (isReplayPending)
-                    {
-                        isTrajectoryActive = false;
-                        isTrajectoryPaused = false;
-                        FillHoldHorizon(Xref_com_horizon, Xref_ee_horizon, comPose_RF.c3.xyz, eePose_RF.c3.xyz);
-                        visualizer.PushGoalTrajectories(Xref_com_horizon, Xref_ee_horizon);
-                    }
-                    else
-                    {
-                        visualizer.PushGoalTrajectories(ReadOnlySpan<RBState>.Empty, ReadOnlySpan<RBState>.Empty);
-                    }
-                    // Between trials (and during the replay countdown) the subject view shows the next path
-                    if (!isTrajectoryActive && isCoMTracked) PreviewPaths(comPose_RF.c3.xyz, eePose_RF.c3.xyz);
-                    break;
-                case CONTROL_MODE.IMPEDANCE:
-                    if (trajectoryTriggered)
-                    {
-                        // A refused start keeps this tick's tensions and takes no new target
-                        if (!TryBeginTrial(comPose_RF.c3.xyz, eePose_RF.c3.xyz)) break;
-                        trajectoryElapsedTime = 0.0;
-                    }
-
-                    if (isTrajectoryActive)
-                    {
-                        if (!isTrajectoryPaused) trajectoryElapsedTime += dt;
-                        comProgress = eeProgress = math.saturate(trajectoryElapsedTime / math.max(0.1, stsDuration));
-
-                        for (int h = 0; h < TrajectoryHorizonSteps; h++)
-                        {
-                            double t_h = trajectoryElapsedTime + (h * dt);
-                            Xref_com_horizon[h] = EvaluateTrajectory(comTrajDisplacements, comTrajVelocities, t_h, seatedCoMPos_RF);
-                            Xref_ee_horizon[h] = EvaluateTrajectory(eeTrajDisplacements, eeTrajVelocities, t_h, seatedEEPos_RF);
-                        }
-                    }
-                    else
-                    {
-                        FillHoldHorizon(Xref_com_horizon, Xref_ee_horizon, comPose_RF.c3.xyz, eePose_RF.c3.xyz);
-                    }
-
-                    RBState targetCoMState = Xref_com_horizon[0];
-                    RBState targetEEState = Xref_ee_horizon[0];
-
-                    visualizer.PushGoalTrajectories(Xref_com_horizon, Xref_ee_horizon);
-
-                    comImpedanceController.UpdateState(comPose_RF, filter_10Hz.CoMLinearVelocity, filter_10Hz.CoMAngularVelocity, targetCoMState);
-                    eeImpedanceController.UpdateState(eePose_RF, filter_10Hz.EELinearVelocity, filter_10Hz.EEAngularVelocity, targetEEState);
-
-                    // Each body is pushed by its own cables. A body without driven cables gets a zero wrench.
-                    comGoalWrench = assistCoM && isCoMTracked ? comImpedanceController.computeNextControl() : zeroWrench;
-                    eeGoalWrench = assistEE && isEETracked ? eeImpedanceController.computeNextControl() : zeroWrench;
-
-                    motor_tension_command.Clear();
-                    CommandCoMCables(assistCoM, comPose_RF, comGoalWrench, ref com_tensions, motor_tension_command);
-                    CommandEECables(assistEE, eePose_RF, eeGoalWrench, ref ee_tensions, motor_tension_command);
-                    break;
-                case CONTROL_MODE.ASSIST_AS_NEEDED:
-                    if (trajectoryTriggered)
-                    {
-                        // Capture both live positions once for each start, including replay. Body
-                        // movement since the previous trial must not reject or re-anchor this path.
-                        if (!TryBeginTrial(comPose_RF.c3.xyz, eePose_RF.c3.xyz, checkRestartDrift: false)) break;
-                        trajectoryElapsedTime = 0.0;
-                        comCompletedTime = eeCompletedTime = -1.0;
-                        comAssistController.SetPath(CoMPath);
-                        eeAssistController?.SetPath(EEPath);
-                    }
-
-                    if (isTrajectoryActive)
-                    {
-                        trajectoryElapsedTime += dt; // times the release ramp and drives the virtual subject; the tunnel has no timing
-
-                        // Each body follows its own tunnel in full to the end of its path, then is released.
-                        // A tracked body without driven cables is still measured, but gets no wrench.
-                        if (isCoMTracked)
-                        {
-                            comAssistController.UpdateState(comPose_RF);
-                            Wrench comTunnelWrench = Release(comAssistController.computeNextControl(), comAssistController, ref comCompletedTime);
-                            if (assistCoM) comGoalWrench = comTunnelWrench;
-                            comDeviation = comAssistController.Deviation;
-                            comProgress = comAssistController.Progress;
-                        }
-                        if (eeAssistController != null && isEETracked)
-                        {
-                            eeAssistController.UpdateState(eePose_RF);
-                            Wrench eeTunnelWrench = Release(eeAssistController.computeNextControl(), eeAssistController, ref eeCompletedTime);
-                            if (assistEE) eeGoalWrench = eeTunnelWrench;
-                            eeDeviation = eeAssistController.Deviation;
-                            eeProgress = eeAssistController.Progress;
-                        }
-
-                        // Once every driven body with a path is released, the trial ends in TRANSPARENT (Space replays)
-                        bool comDone = !assistCoM || IsReleased(comCompletedTime);
-                        bool eeDone = !assistEE || eeAssistController == null || IsReleased(eeCompletedTime);
-                        if (comDone && eeDone) ReleaseToTransparent();
-
-                        // Targets: the nearest point on each path, then a preview of the path ahead.
-                        // The hold covers an EE without a trajectory.
-                        FillHoldHorizon(Xref_com_horizon, Xref_ee_horizon, comPose_RF.c3.xyz, eePose_RF.c3.xyz);
-                        FillPathHorizon(Xref_com_horizon, comAssistController);
-                        if (eeAssistController != null) FillPathHorizon(Xref_ee_horizon, eeAssistController);
-                    }
-                    else
-                    {
-                        FillHoldHorizon(Xref_com_horizon, Xref_ee_horizon, comPose_RF.c3.xyz, eePose_RF.c3.xyz);
-                        if (isCoMTracked) PreviewPaths(comPose_RF.c3.xyz, eePose_RF.c3.xyz);
-                    }
-
-                    visualizer.PushGoalTrajectories(Xref_com_horizon, Xref_ee_horizon);
-
-                    motor_tension_command.Clear();
-                    CommandCoMCables(assistCoM, comPose_RF, comGoalWrench, ref com_tensions, motor_tension_command);
-                    CommandEECables(assistEE, eePose_RF, eeGoalWrench, ref ee_tensions, motor_tension_command);
-                    break;
-            }
-            tcpCommunicator.UpdateTensionSetpoint(motor_tension_command);
-            visualizer.PushState(comPose_RF, eePose_RF, fp0, fp1);
-            visualizer.PushTunnelDeviation(comDeviation, eeDeviation);
-            if (isLogging)
-            {
-                // Goal is the requested wrench. Solver and Measured are what the commanded and the
-                // measured tensions apply (S * T).
-                tcpCommunicator.GetMeasuredTensions(measured_tensions);
-                MapMotorsToTensions(measured_tensions, robotDescription.SolverToMotorMap, actuated_com_tensions);
-                Wrench solverWrench = comTensionPlanner.CalculateResultantWrench(comPose_RF, com_tensions);
-                Wrench measuredWrench = comTensionPlanner.CalculateResultantWrench(comPose_RF, actuated_com_tensions);
-                Wrench eeSolverWrench = zeroWrench;
-                Wrench eeMeasuredWrench = zeroWrench;
-                if (eeTensionPlanner != null)
+                switch (activeControlMode)
                 {
-                    MapMotorsToTensions(measured_tensions, robotDescription.EESolverToMotorMap, actuated_ee_tensions);
-                    eeSolverWrench = eeTensionPlanner.CalculateResultantWrench(eePose_RF, ee_tensions);
-                    eeMeasuredWrench = eeTensionPlanner.CalculateResultantWrench(eePose_RF, actuated_ee_tensions);
+                    case CONTROL_MODE.OFF:
+                        motor_tension_command.Clear();
+                        com_tensions = zeroCoMTensions;
+                        ee_tensions = zeroEETensions;
+                        visualizer.PushGoalTrajectories(ReadOnlySpan<RBState>.Empty, ReadOnlySpan<RBState>.Empty);
+                        break;
+                    case CONTROL_MODE.TRANSPARENT:
+                        motor_tension_command.Clear();
+                        // 8 CoM cables hold a zero wrench (8, 12)
+                        CommandCoMCables(assistCoM, comPose_RF, zeroWrench, ref com_tensions, motor_tension_command);
+                        if (assistEE)
+                        {
+                            // Four EE cables cannot hold a zero wrench, so they hold a light fixed tension (4, 12)
+                            ee_tensions = fixedEETensions;
+                            MapTensionsToMotors(ee_tensions, robotDescription.EESolverToMotorMap, motor_tension_command);
+                        }
+
+                        if (isReplayPending)
+                        {
+                            isTrajectoryActive = false;
+                            isTrajectoryPaused = false;
+                            FillHoldHorizon(Xref_com_horizon, Xref_ee_horizon, comPose_RF.c3.xyz, eePose_RF.c3.xyz);
+                            visualizer.PushGoalTrajectories(Xref_com_horizon, Xref_ee_horizon);
+                        }
+                        else
+                        {
+                            visualizer.PushGoalTrajectories(ReadOnlySpan<RBState>.Empty, ReadOnlySpan<RBState>.Empty);
+                        }
+                        // Preserve the captured path after completion; explicit T clears it.
+                        break;
+                    case CONTROL_MODE.IMPEDANCE:
+                        if (trajectoryTriggered)
+                        {
+                            trajectoryTriggered = false;
+                            trajectoryElapsedTime = 0.0;
+                        }
+
+                        if (isTrajectoryActive)
+                        {
+                            if (!isTrajectoryPaused) trajectoryElapsedTime += dt;
+                            comProgress = eeProgress = math.saturate(trajectoryElapsedTime / math.max(0.1, stsDuration));
+
+                            for (int h = 0; h < TrajectoryHorizonSteps; h++)
+                            {
+                                double t_h = trajectoryElapsedTime + (h * dt);
+                                Xref_com_horizon[h] = EvaluateTrajectory(comTrajDisplacements, comTrajVelocities, t_h, seatedCoMPos_RF);
+                                Xref_ee_horizon[h] = EvaluateTrajectory(eeTrajDisplacements, eeTrajVelocities, t_h, seatedEEPos_RF);
+                            }
+                        }
+                        else
+                        {
+                            FillHoldHorizon(Xref_com_horizon, Xref_ee_horizon, comPose_RF.c3.xyz, eePose_RF.c3.xyz);
+                        }
+
+                        RBState targetCoMState = Xref_com_horizon[0];
+                        RBState targetEEState = Xref_ee_horizon[0];
+
+                        visualizer.PushGoalTrajectories(Xref_com_horizon, Xref_ee_horizon);
+
+                        comImpedanceController.UpdateState(comPose_RF, filter_10Hz.CoMLinearVelocity, filter_10Hz.CoMAngularVelocity, targetCoMState);
+                        eeImpedanceController.UpdateState(eePose_RF, filter_10Hz.EELinearVelocity, filter_10Hz.EEAngularVelocity, targetEEState);
+
+                        // Each body is pushed by its own cables. A body without driven cables gets a zero wrench.
+                        comGoalWrench = isTrajectoryActive && assistCoM && isCoMTracked ? comImpedanceController.computeNextControl() : zeroWrench;
+                        eeGoalWrench = isTrajectoryActive && assistEE && isEETracked ? eeImpedanceController.computeNextControl() : zeroWrench;
+
+                        motor_tension_command.Clear();
+                        CommandCoMCables(assistCoM, comPose_RF, comGoalWrench, ref com_tensions, motor_tension_command);
+                        CommandEECables(assistEE, eePose_RF, eeGoalWrench, ref ee_tensions, motor_tension_command);
+                        break;
+                    case CONTROL_MODE.ASSIST_AS_NEEDED:
+                        if (trajectoryTriggered)
+                        {
+                            trajectoryTriggered = false;
+                            trajectoryElapsedTime = 0.0;
+                            comCompletedTime = eeCompletedTime = -1.0;
+                            comAssistController.SetPath(CoMPath);
+                            eeAssistController?.SetPath(EEPath);
+                        }
+
+                        if (isTrajectoryActive)
+                        {
+                            trajectoryElapsedTime += dt; // times the release ramp and drives the virtual subject; the tunnel has no timing
+
+                            // Each body follows its own tunnel in full to the end of its path, then is released.
+                            // A tracked body without driven cables is still measured, but gets no wrench.
+                            if (isCoMTracked)
+                            {
+                                comAssistController.UpdateState(comPose_RF);
+                                Wrench comTunnelWrench = Release(comAssistController.computeNextControl(), comAssistController, ref comCompletedTime);
+                                if (assistCoM) comGoalWrench = comTunnelWrench;
+                                comDeviation = comAssistController.Deviation;
+                                comProgress = comAssistController.Progress;
+                            }
+                            if (eeAssistController != null && isEETracked)
+                            {
+                                eeAssistController.UpdateState(eePose_RF);
+                                Wrench eeTunnelWrench = Release(eeAssistController.computeNextControl(), eeAssistController, ref eeCompletedTime);
+                                if (assistEE) eeGoalWrench = eeTunnelWrench;
+                                eeDeviation = eeAssistController.Deviation;
+                                eeProgress = eeAssistController.Progress;
+                            }
+
+                            // Once every driven body with a path is released, the trial ends in TRANSPARENT (Space replays)
+                            bool comDone = !assistCoM || IsReleased(comCompletedTime);
+                            bool eeDone = !assistEE || eeAssistController == null || IsReleased(eeCompletedTime);
+                            if (comDone && eeDone) ReleaseToTransparent();
+
+                            // Targets: the nearest point on each path, then a preview of the path ahead.
+                            // The hold covers an EE without a trajectory.
+                            FillHoldHorizon(Xref_com_horizon, Xref_ee_horizon, comPose_RF.c3.xyz, eePose_RF.c3.xyz);
+                            FillPathHorizon(Xref_com_horizon, comAssistController);
+                            if (eeAssistController != null) FillPathHorizon(Xref_ee_horizon, eeAssistController);
+                        }
+                        else
+                        {
+                            FillHoldHorizon(Xref_com_horizon, Xref_ee_horizon, comPose_RF.c3.xyz, eePose_RF.c3.xyz);
+                        }
+
+                        visualizer.PushGoalTrajectories(Xref_com_horizon, Xref_ee_horizon);
+
+                        motor_tension_command.Clear();
+                        CommandCoMCables(assistCoM, comPose_RF, comGoalWrench, ref com_tensions, motor_tension_command);
+                        CommandEECables(assistEE, eePose_RF, eeGoalWrench, ref ee_tensions, motor_tension_command);
+                        break;
                 }
-                dataLogger.Log(loopStartTick, comPose_RF, eePose_RF, fp0, fp1,
-                    comGoalWrench, solverWrench, measuredWrench, Xref_com_horizon[0],
-                    eeGoalWrench, eeSolverWrench, eeMeasuredWrench, Xref_ee_horizon[0],
-                    comDeviation, eeDeviation, comProgress, eeProgress);
+                tcpCommunicator.UpdateTensionSetpoint(motor_tension_command);
+                visualizer.PushState(comPose_RF, eePose_RF, fp0, fp1);
+                visualizer.PushTunnelDeviation(comDeviation, eeDeviation);
+                if (isLogging)
+                {
+                    // Goal is the requested wrench. Solver and Measured are what the commanded and the
+                    // measured tensions apply (S * T).
+                    tcpCommunicator.GetMeasuredTensions(measured_tensions);
+                    MapMotorsToTensions(measured_tensions, robotDescription.SolverToMotorMap, actuated_com_tensions);
+                    Wrench solverWrench = comTensionPlanner.CalculateResultantWrench(comPose_RF, com_tensions);
+                    Wrench measuredWrench = comTensionPlanner.CalculateResultantWrench(comPose_RF, actuated_com_tensions);
+                    Wrench eeSolverWrench = zeroWrench;
+                    Wrench eeMeasuredWrench = zeroWrench;
+                    if (eeTensionPlanner != null)
+                    {
+                        MapMotorsToTensions(measured_tensions, robotDescription.EESolverToMotorMap, actuated_ee_tensions);
+                        eeSolverWrench = eeTensionPlanner.CalculateResultantWrench(eePose_RF, ee_tensions);
+                        eeMeasuredWrench = eeTensionPlanner.CalculateResultantWrench(eePose_RF, actuated_ee_tensions);
+                    }
+                    dataLogger.Log(loopStartTick, comPose_RF, eePose_RF, fp0, fp1,
+                        comGoalWrench, solverWrench, measuredWrench, Xref_com_horizon[0],
+                        eeGoalWrench, eeSolverWrench, eeMeasuredWrench, Xref_ee_horizon[0],
+                        comDeviation, eeDeviation, comProgress, eeProgress);
+                }
+                shownProgress = (float)(assistCoM ? comProgress : eeProgress);
             }
-            shownProgress = (float)(assistCoM ? comProgress : eeProgress);
 
             s_WorkloadNs.Value = (long)((System.Diagnostics.Stopwatch.GetTimestamp() - loopStartTick) * ticksToNs);
             while (System.Diagnostics.Stopwatch.GetTimestamp() < nextTargetTime) { } // BURN wait
@@ -1021,7 +1035,7 @@ public class RobotController : MonoBehaviour
             ? math.lerp(velocities[i0], velocities[i1], frac)
             : double3.zero;
 
-        double3 scale = new double3(userLegLength, userLegLength, riseHeight);
+        double3 scale = new double3(trialLegLength, trialLegLength, riseHeight);
         double3 p = origin + (d * scale);
         double3 vel = (v * scale) / math.max(0.1, stsDuration);
         return new RBState(p, new double3(0, 0, -math.PI / 2), vel, double3.zero);
