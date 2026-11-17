@@ -49,18 +49,18 @@ public class RobotController : MonoBehaviour
     private volatile CABLE_CONFIG trialCableConfig; // numCables as of the current trial's start
     private CABLE_CONFIG acceptedCableConfig; // last accepted numCables, restored when a change is refused
     private CABLE_CONFIG shownCableConfig; // cables whose pulleys the visualizer shows
-    [Tooltip("Measured anterior-posterior thickness at the CoM cable attachments [m].")]
+    [Tooltip("Measured anterior-posterior thickness at the CoM cable attachments [m]. Also the back-to-front pelvis offset for assist-as-needed tracking.")]
     [SerializeField, Label("CoM AP Distance")] private float comAPDistance = 0.2f;
     [Tooltip("Measured medial-lateral width at the CoM cable attachments [m].")]
     [SerializeField, Label("CoM ML Distance")] private float comMLDistance = 0.3f;
-    [Tooltip("Measured anterior-posterior thickness at the EE cable attachments [m].")]
+    [Tooltip("Measured anterior-posterior thickness at the EE cable attachments [m]. Also the back-to-front trunk offset for assist-as-needed tracking.")]
     [SerializeField, Label("EE AP Distance")] private float eeAPDistance = 0.20f;
     [Tooltip("Measured medial-lateral width at the EE cable attachments [m].")]
     [SerializeField, Label("EE ML Distance")] private float eeMLDistance = 0.28f;
     [Tooltip("User body mass [kg].")]
     [SerializeField] private float userMass = 70.0f;
 
-    // GPR trajectory CSVs in Assets/Scripts
+    // GPR trajectory CSVs in Assets/Scripts/Trajectories (legacy Scripts location also supported)
     private const string CoMTrajectoryCsvName = "SitToWalk_GPR_Pelvis_NoVR_normalized.csv";
     private const string EETrajectoryCsvName = "SitToWalk_GPR_Trunk_NoVR_normalized.csv";
 
@@ -106,6 +106,10 @@ public class RobotController : MonoBehaviour
     private volatile bool isTrajectoryPaused = false;
     private volatile bool isReplayPending = false; // reset to TRANSPARENT, and Space returns to replayControlMode
     private CONTROL_MODE replayControlMode = CONTROL_MODE.IMPEDANCE;
+    // Includes the countdown and retained feedback after an assist-as-needed trial.
+    private bool UsesVirtualFrontTracking => currentControlMode == CONTROL_MODE.ASSIST_AS_NEEDED
+        || (currentControlMode == CONTROL_MODE.TRANSPARENT && isReplayPending
+            && replayControlMode == CONTROL_MODE.ASSIST_AS_NEEDED);
     private float countdownEndTime = -1f;
     private bool isCountingDown;
 
@@ -461,7 +465,13 @@ public class RobotController : MonoBehaviour
         }
         if (math.lengthsq(eePose.c3.xyz) <= 0.001)
             eePose = MakePose(comPose.c3.xyz + new double3(0, 0, 0.25), quaternion.RotateZ(-math.PI / 2));
-        if (!TryBeginTrial(comPose.c3.xyz, eePose.c3.xyz)) return false;
+        double3 trackingPosition = UsesVirtualFrontTracking
+            ? robotDescription.VirtualFrontCoMPosition(comPose) : comPose.c3.xyz;
+        if (!math.all(math.isfinite(trackingPosition))) return false;
+        double3 eeTrackingPosition = UsesVirtualFrontTracking
+            ? robotDescription.VirtualFrontEEPosition(eePose) : eePose.c3.xyz;
+        if (!math.all(math.isfinite(eeTrackingPosition))) return false;
+        if (!TryBeginTrial(trackingPosition, eeTrackingPosition)) return false;
         trialCableConfig = numCables;
         shownProgress = 0f;
         return true;
@@ -542,8 +552,11 @@ public class RobotController : MonoBehaviour
         double bump = MockPeakDeviation * math.pow(math.sin(math.PI * tau), 2.0); // smooth, largest halfway
         double3 CoM = EvaluateTrajectory(comTrajDisplacements, comTrajVelocities, mockTime, seatedCoMPos_RF).p + bump * new double3(0.6, 0.0, 0.8); // back is +X
         double3 EE = EvaluateTrajectory(eeTrajDisplacements, eeTrajVelocities, mockTime, seatedEEPos_RF).p + bump * new double3(0.8, 0.0, 0.0);
-        comPose = MakePose(CoM, quaternion.identity);
+        // CoM is the virtual front target; reconstruct the physical back pose for simulation.
+        comPose = MakePose(CoM + new double3(0, robotDescription.CoMAPDistance, 0), quaternion.identity);
         eePose = MakePose(EE, quaternion.RotateZ(-math.PI / 2));
+        // Remove the rotated local offset so the simulated front point follows EE.
+        eePose.c3 = new double4(EE - (robotDescription.VirtualFrontEEPosition(eePose) - EE), 1);
     }
 
     // Sends a wrench through the CoM cables. A zero wrench settles them at minimum tension.
@@ -663,6 +676,10 @@ public class RobotController : MonoBehaviour
                 Wrench comGoalWrench = zeroWrench; // what the controller requested, for logging
                 Wrench eeGoalWrench = zeroWrench;
                 CONTROL_MODE activeControlMode = currentControlMode;
+                double3 virtualFrontCoM = robotDescription.VirtualFrontCoMPosition(comPose_RF);
+                double3 comTrackingPosition = UsesVirtualFrontTracking ? virtualFrontCoM : comPose_RF.c3.xyz;
+                double3 virtualFrontEE = robotDescription.VirtualFrontEEPosition(eePose_RF);
+                double3 eeTrackingPosition = UsesVirtualFrontTracking ? virtualFrontEE : eePose_RF.c3.xyz;
                 // A running trial keeps the cables it started with. Undriven cables log zero tension.
                 CABLE_CONFIG activeCables = ActiveCables;
                 bool assistCoM = DrivesCoM(activeCables);
@@ -693,7 +710,7 @@ public class RobotController : MonoBehaviour
                         {
                             isTrajectoryActive = false;
                             isTrajectoryPaused = false;
-                            FillHoldHorizon(Xref_com_horizon, Xref_ee_horizon, comPose_RF.c3.xyz, eePose_RF.c3.xyz);
+                            FillHoldHorizon(Xref_com_horizon, Xref_ee_horizon, comTrackingPosition, eeTrackingPosition);
                             visualizer.PushGoalTrajectories(Xref_com_horizon, Xref_ee_horizon);
                         }
                         else
@@ -723,7 +740,7 @@ public class RobotController : MonoBehaviour
                         }
                         else
                         {
-                            FillHoldHorizon(Xref_com_horizon, Xref_ee_horizon, comPose_RF.c3.xyz, eePose_RF.c3.xyz);
+                            FillHoldHorizon(Xref_com_horizon, Xref_ee_horizon, comTrackingPosition, eeTrackingPosition);
                         }
 
                         RBState targetCoMState = Xref_com_horizon[0];
@@ -760,7 +777,7 @@ public class RobotController : MonoBehaviour
                             // A tracked body without driven cables is still measured, but gets no wrench.
                             if (isCoMTracked)
                             {
-                                comAssistController.UpdateState(comPose_RF);
+                                comAssistController.UpdatePosition(comTrackingPosition);
                                 Wrench comTunnelWrench = Release(comAssistController.computeNextControl(), comAssistController, ref comCompletedTime);
                                 if (assistCoM) comGoalWrench = comTunnelWrench;
                                 comDeviation = comAssistController.Deviation;
@@ -768,7 +785,7 @@ public class RobotController : MonoBehaviour
                             }
                             if (eeAssistController != null && isEETracked)
                             {
-                                eeAssistController.UpdateState(eePose_RF);
+                                eeAssistController.UpdatePosition(eeTrackingPosition);
                                 Wrench eeTunnelWrench = Release(eeAssistController.computeNextControl(), eeAssistController, ref eeCompletedTime);
                                 if (assistEE) eeGoalWrench = eeTunnelWrench;
                                 eeDeviation = eeAssistController.Deviation;
@@ -782,13 +799,13 @@ public class RobotController : MonoBehaviour
 
                             // Targets: the nearest point on each path, then a preview of the path ahead.
                             // The hold covers an EE without a trajectory.
-                            FillHoldHorizon(Xref_com_horizon, Xref_ee_horizon, comPose_RF.c3.xyz, eePose_RF.c3.xyz);
+                            FillHoldHorizon(Xref_com_horizon, Xref_ee_horizon, comTrackingPosition, eeTrackingPosition);
                             FillPathHorizon(Xref_com_horizon, comAssistController);
                             if (eeAssistController != null) FillPathHorizon(Xref_ee_horizon, eeAssistController);
                         }
                         else
                         {
-                            FillHoldHorizon(Xref_com_horizon, Xref_ee_horizon, comPose_RF.c3.xyz, eePose_RF.c3.xyz);
+                            FillHoldHorizon(Xref_com_horizon, Xref_ee_horizon, comTrackingPosition, eeTrackingPosition);
                         }
 
                         visualizer.PushGoalTrajectories(Xref_com_horizon, Xref_ee_horizon);
@@ -799,7 +816,7 @@ public class RobotController : MonoBehaviour
                         break;
                 }
                 tcpCommunicator.UpdateTensionSetpoint(motor_tension_command);
-                visualizer.PushState(comPose_RF, eePose_RF, fp0, fp1);
+                visualizer.PushState(comPose_RF, eePose_RF, fp0, fp1, comTrackingPosition, eeTrackingPosition);
                 visualizer.PushTunnelDeviation(comDeviation, eeDeviation);
                 if (isLogging)
                 {
@@ -817,10 +834,14 @@ public class RobotController : MonoBehaviour
                         eeSolverWrench = eeTensionPlanner.CalculateResultantWrench(eePose_RF, ee_tensions);
                         eeMeasuredWrench = eeTensionPlanner.CalculateResultantWrench(eePose_RF, actuated_ee_tensions);
                     }
+                    // Read AFTER completion can switch A to T. During a replay countdown,
+                    // label the selected trial mode even though control remains transparent until Go.
+                    CONTROL_MODE loggedMode = isCountingDown && isReplayPending
+                        && currentControlMode == CONTROL_MODE.TRANSPARENT ? replayControlMode : currentControlMode;
                     dataLogger.Log(loopStartTick, comPose_RF, eePose_RF, fp0, fp1,
                         comGoalWrench, solverWrench, measuredWrench, Xref_com_horizon[0],
                         eeGoalWrench, eeSolverWrench, eeMeasuredWrench, Xref_ee_horizon[0],
-                        comDeviation, eeDeviation, comProgress, eeProgress);
+                        comDeviation, eeDeviation, comProgress, eeProgress, virtualFrontCoM, virtualFrontEE, loggedMode);
                 }
                 shownProgress = (float)(assistCoM ? comProgress : eeProgress);
             }
@@ -916,6 +937,8 @@ public class RobotController : MonoBehaviour
         try
         {
             string path = System.IO.Path.Combine(Application.dataPath, "Scripts", csvName);
+            string trajectoryPath = System.IO.Path.Combine(Application.dataPath, "Scripts", "Trajectories", csvName);
+            if (System.IO.File.Exists(trajectoryPath)) path = trajectoryPath;
             if (!System.IO.File.Exists(path))
             {
                 string alt = csvName.Contains("_normalized")

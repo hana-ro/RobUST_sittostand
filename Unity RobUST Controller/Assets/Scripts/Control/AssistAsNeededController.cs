@@ -58,12 +58,18 @@ public class AssistAsNeededController : BaseController<Wrench>
             arcLength[i] = arcLength[i - 1] + math.length(Sagittal(path[i] - path[i - 1]));
         segment = 0;
         Completed = false;
+        Progress = 0.0;
+        Deviation = 0.0;
+        NearestPoint = path[0];
     }
 
     public void UpdateState(in double4x4 pose_RF)
     {
         currentPos = pose_RF.c3.xyz;
     }
+
+    /// <summary>Tracks a body-fixed virtual point without changing the physical tracker pose.</summary>
+    public void UpdatePosition(in double3 position_RF) => currentPos = position_RF;
 
     public override Wrench computeNextControl()
     {

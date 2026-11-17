@@ -48,12 +48,20 @@ public sealed class RobUSTDescription
     
     /// <summary>CoM anterior-posterior distance [m]</summary>
     public readonly double CoMAPDistance;
+
+    /// <summary>Original front measurement point, assuming a midline back tracker at the same body-local height.</summary>
+    public double3 VirtualFrontCoMPosition(in double4x4 backTrackerPose) =>
+        math.mul(backTrackerPose, new double4(0, -CoMAPDistance, 0, 1)).xyz;
     
     /// <summary>CoM medial-lateral distance [m]</summary>
     public readonly double CoMMLDistance;
 
     /// <summary>EE anterior-posterior distance [m]</summary>
     public readonly double EEAPDistance;
+
+    /// <summary>Front trunk point from a midline back tracker, at the same body-local height.</summary>
+    public double3 VirtualFrontEEPosition(in double4x4 backTrackerPose) =>
+        math.mul(backTrackerPose, new double4(0, -EEAPDistance, 0, 1)).xyz;
 
     /// <summary>EE medial-lateral distance [m]</summary>
     public readonly double EEMLDistance;

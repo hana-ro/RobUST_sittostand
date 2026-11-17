@@ -315,11 +315,17 @@ public class RobotVisualizer : MonoBehaviour
     /// <summary>
     /// Updated API: Accepts double4x4 directly.
     /// </summary>
-    public void PushState(in double4x4 comPose, in double4x4 eePose, in ForcePlateData fp0, in ForcePlateData fp1)
+    private double3 _comTrackingPosition;
+    private double3 _eeTrackingPosition;
+
+    public void PushState(in double4x4 comPose, in double4x4 eePose, in ForcePlateData fp0, in ForcePlateData fp1,
+                          in double3 comTrackingPosition, in double3 eeTrackingPosition)
     {
         lock (dataLock)
         {
             _comPose_Robot = comPose;
+            _comTrackingPosition = comTrackingPosition;
+            _eeTrackingPosition = eeTrackingPosition;
             _eePose_Robot = eePose;
             _cop0_Robot = fp0.CoP;
             _grf0_Robot = fp0.Force;
@@ -391,7 +397,7 @@ public class RobotVisualizer : MonoBehaviour
 
         // Local cache vars
         double4x4 comMat, eeMat;
-        double3 cop0, grf0, cop1, grf1;
+        double3 cop0, grf0, cop1, grf1, comTrackingPosition, eeTrackingPosition;
         double comTunnelDeviation, eeTunnelDeviation;
         Span<double3> goalSnapshot = stackalloc double3[GoalTrajSteps];
         Span<double3> eeSnapshot = stackalloc double3[GoalTrajSteps];
@@ -400,6 +406,8 @@ public class RobotVisualizer : MonoBehaviour
         {
             // Simple snapshotting - dump latest state
             comMat = _comPose_Robot;
+            comTrackingPosition = _comTrackingPosition;
+            eeTrackingPosition = _eeTrackingPosition;
             eeMat = _eePose_Robot;
             cop0 = _cop0_Robot;
             grf0 = _grf0_Robot;
@@ -414,9 +422,10 @@ public class RobotVisualizer : MonoBehaviour
             }
         }
 
-        CoMPosition = comMat.c3.xyz;
+        // SubjectVisualFeedbackView uses this same point as the trajectory controller.
+        CoMPosition = comTrackingPosition;
         CoMDeviation = comTunnelDeviation;
-        EEPosition = eeMat.c3.xyz;
+        EEPosition = eeTrackingPosition;
         EEDeviation = eeTunnelDeviation;
 
         // 1. Cast to float4x4 once (Visuals don't need double precision)
@@ -425,9 +434,13 @@ public class RobotVisualizer : MonoBehaviour
         
         comTrackerVisual.position = (Vector3)RobotToUnityPos(comF.c3.xyz);
         comTrackerVisual.rotation = (Quaternion)RobotToUnityRot(new quaternion(comF));
+        if (comMarker != null)
+            comMarker.transform.position = (Vector3)RobotToUnityPos((float3)comTrackingPosition);
 
         eeTrackerVisual.position = (Vector3)RobotToUnityPos(eeF.c3.xyz);
         eeTrackerVisual.rotation = (Quaternion)RobotToUnityRot(new quaternion(eeF));
+        if (eeMarker != null)
+            eeMarker.transform.position = (Vector3)RobotToUnityPos((float3)eeTrackingPosition);
         
         // Frame (Always Origin)
         frameTrackerVisual.localPosition = Vector3.zero; 

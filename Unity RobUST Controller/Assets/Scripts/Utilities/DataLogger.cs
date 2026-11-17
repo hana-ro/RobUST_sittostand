@@ -17,7 +17,10 @@ public class DataLogger
     public struct DataFrame
     {
         public double Timestamp;
+        public RobotController.CONTROL_MODE ControlMode;
         public double4x4 CoMPoseRF;
+        public double3 CoMVirtualFrontPositionRF;
+        public double3 EEVirtualFrontPositionRF;
         public double4x4 EEPoseRF;
         public ForcePlateData FP1;
         public ForcePlateData FP2;
@@ -86,7 +89,9 @@ public class DataLogger
                     in ForcePlateData fp1, in ForcePlateData fp2,
                     in Wrench comGoalWrench, in Wrench comSolverWrench, in Wrench comMeasuredWrench, in RBState comGoalState,
                     in Wrench eeGoalWrench, in Wrench eeSolverWrench, in Wrench eeMeasuredWrench, in RBState eeGoalState,
-                    double comDeviation, double eeDeviation, double comProgress, double eeProgress)
+                    double comDeviation, double eeDeviation, double comProgress, double eeProgress,
+                    in double3 comVirtualFrontPosition, in double3 eeVirtualFrontPosition,
+                    RobotController.CONTROL_MODE controlMode)
     {
         if (_cursor >= _maxFrames) return;
 
@@ -95,7 +100,10 @@ public class DataLogger
 
         // Absolute UTC timestamp in seconds since Unix epoch
         frame.Timestamp = _anchorEpochSeconds + ((timestamp_tick - _anchorTick) * _tickToSeconds);
+        frame.ControlMode = controlMode;
         frame.CoMPoseRF = comPose;
+        frame.CoMVirtualFrontPositionRF = comVirtualFrontPosition;
+        frame.EEVirtualFrontPositionRF = eeVirtualFrontPosition;
         frame.EEPoseRF = eePose;
         frame.FP1 = fp1;
         frame.FP2 = fp2;
@@ -152,7 +160,8 @@ public class DataLogger
                 sb.Append("EE_Solver_Fx,EE_Solver_Fy,EE_Solver_Fz,EE_Solver_Tx,EE_Solver_Ty,EE_Solver_Tz,");
                 sb.Append("EE_Measured_Fx,EE_Measured_Fy,EE_Measured_Fz,EE_Measured_Tx,EE_Measured_Ty,EE_Measured_Tz,");
                 sb.Append("EE_Goal_Px,EE_Goal_Py,EE_Goal_Pz,EE_Goal_Ex,EE_Goal_Ey,EE_Goal_Ez,EE_Goal_Vx,EE_Goal_Vy,EE_Goal_Vz,EE_Goal_Wx,EE_Goal_Wy,EE_Goal_Wz,");
-                sb.Append("CoM_Deviation,EE_Deviation,CoM_Progress,EE_Progress");
+                sb.Append("CoM_Deviation,EE_Deviation,CoM_Progress,EE_Progress,CoM_VirtualFront_Px,CoM_VirtualFront_Py,CoM_VirtualFront_Pz,ControlMode");
+                sb.Append(",EE_VirtualFront_Px,EE_VirtualFront_Py,EE_VirtualFront_Pz");
 
                 writer.WriteLine(sb.ToString());
 
@@ -190,6 +199,13 @@ public class DataLogger
                     AppendVec3(sb, f.EEGoalState.w);
 
                     sb.Append(f.CoMDeviation).Append(',').Append(f.EEDeviation).Append(',').Append(f.CoMProgress).Append(',').Append(f.EEProgress);
+                    sb.Append(',').Append(f.CoMVirtualFrontPositionRF.x.ToString("G17", CultureInfo.InvariantCulture));
+                    sb.Append(',').Append(f.CoMVirtualFrontPositionRF.y.ToString("G17", CultureInfo.InvariantCulture));
+                    sb.Append(',').Append(f.CoMVirtualFrontPositionRF.z.ToString("G17", CultureInfo.InvariantCulture));
+                    sb.Append(',').Append(f.ControlMode.ToString());
+                    sb.Append(',').Append(f.EEVirtualFrontPositionRF.x.ToString("G17", CultureInfo.InvariantCulture));
+                    sb.Append(',').Append(f.EEVirtualFrontPositionRF.y.ToString("G17", CultureInfo.InvariantCulture));
+                    sb.Append(',').Append(f.EEVirtualFrontPositionRF.z.ToString("G17", CultureInfo.InvariantCulture));
 
                     writer.WriteLine(sb.ToString());
                 }
