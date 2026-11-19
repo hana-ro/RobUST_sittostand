@@ -4,6 +4,7 @@ using System.IO;
 using System.Text;
 using System;
 using System.Globalization;
+using System.Collections.Generic;
 
 /// <summary>
 /// High-performance logger that uses a pre-allocated array of structs
@@ -36,7 +37,19 @@ public class DataLogger
         public double EEDeviation;
         public double CoMProgress;
         public double EEProgress;
+        public int TrialIndex; // 1-based trial in _trials; 0 before the first trial
     }
+
+    // Captured once per trial on Space. Paths are the full reference paths in the Robot Frame.
+    private struct TrialInfo
+    {
+        public int StartFrame;
+        public string CableConfig;
+        public double LegLength, ChairHeight, SeatedCoMHeight, SeatedEEHeight, Rise;
+        public double3 SeatedCoM, SeatedEE;
+        public double3[] CoMPath, EEPath; // null when that trajectory did not load
+    }
+    private readonly List<TrialInfo> _trials = new List<TrialInfo>();
 
     private DataFrame[] _buffer;
     private int _cursor = 0;
@@ -119,8 +132,39 @@ public class DataLogger
         frame.EEDeviation = eeDeviation;
         frame.CoMProgress = comProgress;
         frame.EEProgress = eeProgress;
+        frame.TrialIndex = _trials.Count;
 
         _cursor++;
+    }
+
+    /// <summary>
+    /// Records a new trial's reference, captured on Space. Frames logged from now on belong to it.
+    /// Call outside the hot loop: it copies the paths. Must not run concurrently with Log.
+    /// </summary>
+    /// <param name="seatedCoMPos">Seated CoM tracking position, the CoM path origin [m, Robot Frame]</param>
+    /// <param name="seatedEEPos">Seated EE tracking position, the EE path origin [m, Robot Frame]</param>
+    /// <param name="seatedCoMHeight">Seated CoM tracking point above the floor [m]</param>
+    /// <param name="seatedEEHeight">Seated EE tracking point above the floor [m]</param>
+    /// <param name="rise">Vertical path scale: leg length minus seated CoM height [m]</param>
+    public void BeginTrial(string cableConfig, double legLength, double chairHeight,
+                           double seatedCoMHeight, double seatedEEHeight, double rise,
+                           in double3 seatedCoMPos, in double3 seatedEEPos,
+                           double3[] comPath, double3[] eePath)
+    {
+        _trials.Add(new TrialInfo
+        {
+            StartFrame = _cursor,
+            CableConfig = cableConfig,
+            LegLength = legLength,
+            ChairHeight = chairHeight,
+            SeatedCoMHeight = seatedCoMHeight,
+            SeatedEEHeight = seatedEEHeight,
+            Rise = rise,
+            SeatedCoM = seatedCoMPos,
+            SeatedEE = seatedEEPos,
+            CoMPath = (double3[])comPath?.Clone(),
+            EEPath = (double3[])eePath?.Clone(),
+        });
     }
 
     /// <summary>
@@ -162,6 +206,13 @@ public class DataLogger
                 sb.Append("EE_Goal_Px,EE_Goal_Py,EE_Goal_Pz,EE_Goal_Ex,EE_Goal_Ey,EE_Goal_Ez,EE_Goal_Vx,EE_Goal_Vy,EE_Goal_Vz,EE_Goal_Wx,EE_Goal_Wy,EE_Goal_Wz,");
                 sb.Append("CoM_Deviation,EE_Deviation,CoM_Progress,EE_Progress,CoM_VirtualFront_Px,CoM_VirtualFront_Py,CoM_VirtualFront_Pz,ControlMode");
                 sb.Append(",EE_VirtualFront_Px,EE_VirtualFront_Py,EE_VirtualFront_Pz");
+                // Per-trial reference: constant over a trial's rows. Path point k sits on the trial's
+                // k-th row (Path_Index = k); later rows leave the path columns blank.
+                sb.Append(",TrialIndex,Trial_CableConfig,Trial_LegLength,Trial_ChairHeight");
+                sb.Append(",Trial_SeatedCoMHeight,Trial_SeatedEEHeight,Trial_Rise");
+                sb.Append(",Trial_SeatedCoM_Px,Trial_SeatedCoM_Py,Trial_SeatedCoM_Pz");
+                sb.Append(",Trial_SeatedEE_Px,Trial_SeatedEE_Py,Trial_SeatedEE_Pz");
+                sb.Append(",Path_Index,CoM_Path_Px,CoM_Path_Py,CoM_Path_Pz,EE_Path_Px,EE_Path_Py,EE_Path_Pz");
 
                 writer.WriteLine(sb.ToString());
 
@@ -198,7 +249,10 @@ public class DataLogger
                     AppendVec3(sb, f.EEGoalState.v);
                     AppendVec3(sb, f.EEGoalState.w);
 
-                    sb.Append(f.CoMDeviation).Append(',').Append(f.EEDeviation).Append(',').Append(f.CoMProgress).Append(',').Append(f.EEProgress);
+                    AppendNum(sb, f.CoMDeviation).Append(',');
+                    AppendNum(sb, f.EEDeviation).Append(',');
+                    AppendNum(sb, f.CoMProgress).Append(',');
+                    AppendNum(sb, f.EEProgress);
                     sb.Append(',').Append(f.CoMVirtualFrontPositionRF.x.ToString("G17", CultureInfo.InvariantCulture));
                     sb.Append(',').Append(f.CoMVirtualFrontPositionRF.y.ToString("G17", CultureInfo.InvariantCulture));
                     sb.Append(',').Append(f.CoMVirtualFrontPositionRF.z.ToString("G17", CultureInfo.InvariantCulture));
@@ -206,6 +260,7 @@ public class DataLogger
                     sb.Append(',').Append(f.EEVirtualFrontPositionRF.x.ToString("G17", CultureInfo.InvariantCulture));
                     sb.Append(',').Append(f.EEVirtualFrontPositionRF.y.ToString("G17", CultureInfo.InvariantCulture));
                     sb.Append(',').Append(f.EEVirtualFrontPositionRF.z.ToString("G17", CultureInfo.InvariantCulture));
+                    AppendTrial(sb, f.TrialIndex, i);
 
                     writer.WriteLine(sb.ToString());
                 }
@@ -218,6 +273,46 @@ public class DataLogger
         }
     }
 
+    private const int TrialColumnCount = 13; // TrialIndex through Trial_SeatedEE_Pz
+    private const int PathColumnCount = 7;   // Path_Index and the six path coordinates
+
+    // Trial columns, each preceded by a comma, ending the row
+    private void AppendTrial(StringBuilder sb, int trialIndex, int frame)
+    {
+        sb.Append(',').Append(trialIndex);
+        if (trialIndex <= 0 || trialIndex > _trials.Count)
+        {
+            sb.Append(',', TrialColumnCount - 1 + PathColumnCount);
+            return;
+        }
+        TrialInfo t = _trials[trialIndex - 1];
+        sb.Append(',').Append(t.CableConfig);
+        sb.Append(','); AppendNum(sb, t.LegLength);
+        sb.Append(','); AppendNum(sb, t.ChairHeight);
+        sb.Append(','); AppendNum(sb, t.SeatedCoMHeight);
+        sb.Append(','); AppendNum(sb, t.SeatedEEHeight);
+        sb.Append(','); AppendNum(sb, t.Rise);
+        AppendPoint(sb, t.SeatedCoM, true);
+        AppendPoint(sb, t.SeatedEE, true);
+
+        int k = frame - t.StartFrame;
+        bool hasCoM = t.CoMPath != null && k < t.CoMPath.Length;
+        bool hasEE = t.EEPath != null && k < t.EEPath.Length;
+        sb.Append(',');
+        if (hasCoM || hasEE) sb.Append(k);
+        AppendPoint(sb, hasCoM ? t.CoMPath[k] : default, hasCoM);
+        AppendPoint(sb, hasEE ? t.EEPath[k] : default, hasEE);
+    }
+
+    // ",x,y,z", or ",,," when absent
+    private void AppendPoint(StringBuilder sb, in double3 p, bool present)
+    {
+        if (!present) { sb.Append(',', 3); return; }
+        sb.Append(','); AppendNum(sb, p.x);
+        sb.Append(','); AppendNum(sb, p.y);
+        sb.Append(','); AppendNum(sb, p.z);
+    }
+
     // Helpers to keep the loop clean
     private void AppendMatrixHeader(StringBuilder sb, string prefix)
     {
@@ -226,16 +321,30 @@ public class DataLogger
                 sb.Append($"{prefix}_m{r}{c},");
     }
 
+    // Always '.' as the decimal separator, whatever the PC's regional settings,
+    // so a value like 0.5 never becomes "0,5" and splits into two CSV columns.
+    private static StringBuilder AppendNum(StringBuilder sb, double value)
+    {
+        return sb.Append(value.ToString(CultureInfo.InvariantCulture));
+    }
+
     private void AppendMatrix(StringBuilder sb, in double4x4 m)
     {
-        sb.Append(m.c0.x).Append(',').Append(m.c1.x).Append(',').Append(m.c2.x).Append(',').Append(m.c3.x).Append(',');
-        sb.Append(m.c0.y).Append(',').Append(m.c1.y).Append(',').Append(m.c2.y).Append(',').Append(m.c3.y).Append(',');
-        sb.Append(m.c0.z).Append(',').Append(m.c1.z).Append(',').Append(m.c2.z).Append(',').Append(m.c3.z).Append(',');
-        sb.Append(m.c0.w).Append(',').Append(m.c1.w).Append(',').Append(m.c2.w).Append(',').Append(m.c3.w).Append(',');
+        // Row-major: each row is c0..c3 at that component.
+        AppendRow(sb, m.c0.x, m.c1.x, m.c2.x, m.c3.x);
+        AppendRow(sb, m.c0.y, m.c1.y, m.c2.y, m.c3.y);
+        AppendRow(sb, m.c0.z, m.c1.z, m.c2.z, m.c3.z);
+        AppendRow(sb, m.c0.w, m.c1.w, m.c2.w, m.c3.w);
+    }
+
+    private void AppendRow(StringBuilder sb, double a, double b, double c, double d)
+    {
+        AppendNum(sb, a).Append(','); AppendNum(sb, b).Append(',');
+        AppendNum(sb, c).Append(','); AppendNum(sb, d).Append(',');
     }
 
     private void AppendVec3(StringBuilder sb, in double3 v)
     {
-        sb.Append(v.x).Append(',').Append(v.y).Append(',').Append(v.z).Append(',');
+        AppendNum(sb, v.x).Append(','); AppendNum(sb, v.y).Append(','); AppendNum(sb, v.z).Append(',');
     }
 }

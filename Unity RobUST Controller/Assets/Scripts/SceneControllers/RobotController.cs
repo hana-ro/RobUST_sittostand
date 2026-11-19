@@ -211,7 +211,6 @@ public class RobotController : MonoBehaviour
         if (isLabviewControlEnabled)
         {
             tcpCommunicator.ConnectToServer();
-            tcpCommunicator.SetClosedLoopControl();
         }
         dataLogger = new DataLogger(60, 100);
 
@@ -291,6 +290,8 @@ public class RobotController : MonoBehaviour
 
     public static bool DrivesCoM(CABLE_CONFIG config) => config != CABLE_CONFIG.EE_ONLY;
     public static bool DrivesEE(CABLE_CONFIG config) => config != CABLE_CONFIG.COM_ONLY;
+
+    private bool CanSendTcpCommands() => tcpCommunicator != null && tcpCommunicator.IsConnected;
 
     private void Update()
     {
@@ -500,6 +501,9 @@ public class RobotController : MonoBehaviour
         trialLegLength = userLegLength;
         if (comTrajDisplacements != null) CoMPath = BuildPath(comTrajDisplacements, comPos, rise);
         EEPath = eeAssistController != null ? BuildPath(eeTrajDisplacements, eePos, rise) : null;
+        // Same lock as the control loop's Log, so the trial starts on a frame boundary.
+        dataLogger?.BeginTrial(numCables.ToString(), trialLegLength, chairHeight,
+            seatedCoMHeight, eePos.z - robotDescription.FloorZ, rise, comPos, eePos, CoMPath, EEPath);
         //Debug.Log($"[RobotController] Seated CoM height {seatedCoMHeight:F3}m, leg length {userLegLength:F3}m, rise height {riseHeight:F3}m.");
         return true;
     }
@@ -691,12 +695,20 @@ public class RobotController : MonoBehaviour
                 {
                     case CONTROL_MODE.OFF:
                         motor_tension_command.Clear();
+                        if (CanSendTcpCommands())
+                        {
+                            tcpCommunicator.SetOpenLoopControl();
+                        }
                         com_tensions = zeroCoMTensions;
                         ee_tensions = zeroEETensions;
                         visualizer.PushGoalTrajectories(ReadOnlySpan<RBState>.Empty, ReadOnlySpan<RBState>.Empty);
                         break;
                     case CONTROL_MODE.TRANSPARENT:
                         motor_tension_command.Clear();
+                        if (CanSendTcpCommands())
+                        {
+                            tcpCommunicator.SetClosedLoopControl();
+                        }
                         // 8 CoM cables hold a zero wrench (8, 12)
                         CommandCoMCables(assistCoM, comPose_RF, zeroWrench, ref com_tensions, motor_tension_command);
                         if (assistEE)
@@ -756,6 +768,10 @@ public class RobotController : MonoBehaviour
                         eeGoalWrench = isTrajectoryActive && assistEE && isEETracked ? eeImpedanceController.computeNextControl() : zeroWrench;
 
                         motor_tension_command.Clear();
+                        if (CanSendTcpCommands())
+                        {
+                            tcpCommunicator.SetClosedLoopControl();
+                        }
                         CommandCoMCables(assistCoM, comPose_RF, comGoalWrench, ref com_tensions, motor_tension_command);
                         CommandEECables(assistEE, eePose_RF, eeGoalWrench, ref ee_tensions, motor_tension_command);
                         break;
@@ -811,6 +827,10 @@ public class RobotController : MonoBehaviour
                         visualizer.PushGoalTrajectories(Xref_com_horizon, Xref_ee_horizon);
 
                         motor_tension_command.Clear();
+                        if (CanSendTcpCommands())
+                        {
+                            tcpCommunicator.SetClosedLoopControl();
+                        }
                         CommandCoMCables(assistCoM, comPose_RF, comGoalWrench, ref com_tensions, motor_tension_command);
                         CommandEECables(assistEE, eePose_RF, eeGoalWrench, ref ee_tensions, motor_tension_command);
                         break;

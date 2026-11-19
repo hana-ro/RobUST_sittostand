@@ -1,7 +1,16 @@
-"""Pick a CSV folder and plot solver versus measured COM wrench for each file.
+"""Pick a CSV folder and plot the commanded (solver) versus measured output
+wrench of a body segment for each file.
+
+The segment is chosen from the file name, e.g. "Trunk_3_2026-11-17_15-28-43.csv":
+  Pelvis -> CoM_* columns
+  Trunk  -> EE_* columns
+Files naming neither segment are skipped with a warning.
+
+Error metrics (average and max absolute error, % error and index of the
+max-error sample) use only assist-as-needed samples.
 
 Install dependencies: python -m pip install pandas matplotlib
-Run: python plot_com_wrench.py
+Run: python plot_output_wrench.py
 Figures are displayed without saving files.
 """
 
@@ -16,10 +25,13 @@ import pandas as pd
 
 
 COMPONENTS = ("Fx", "Fy", "Fz", "Tx", "Ty", "Tz")
+# File-name keyword -> CSV column prefix written by DataLogger.cs.
+SEGMENTS = {"Pelvis": "CoM", "Trunk": "EE"}
+METRIC_MODE = "ASSIST_AS_NEEDED"  # error metrics use only samples in this mode
 MODE_STYLES = {
-    "ASSIST_AS_NEEDED": ("A: Assist-as-needed (includes countdown)", "#81c784"),
+    "ASSIST_AS_NEEDED": ("A: Assist-as-needed", "#81c784"),
     "TRANSPARENT": ("T: Transparent", "#bdbdbd"),
-    "IMPEDANCE": ("I: Impedance (includes countdown)", "#90caf9"),
+    "IMPEDANCE": ("I: Impedance", "#90caf9"),
     "OFF": ("O: Off", "#ffcc80"),
 }
 
@@ -35,24 +47,31 @@ def mode_regions(x, modes):
             for start, end in zip(starts, np.r_[starts[1:], len(x)])]
 
 
-def error_metrics(commanded, measured):
+def error_metrics(commanded, measured, include):
     """Absolute errors and percentage at the first largest-error sample.
 
-    Percentage uses the magnitude of that sample's solver value, not the
-    peak solver value or the largest percentage across the file.
+    Only samples where `include` is True count. max_index is the row index in
+    the whole CSV. Percentage uses the magnitude of that sample's solver value,
+    not the peak solver value or the largest percentage across the samples.
     """
     commanded = np.asarray(commanded, dtype=float)
     measured = np.asarray(measured, dtype=float)
-    valid = np.isfinite(commanded) & np.isfinite(measured)
+    valid = np.isfinite(commanded) & np.isfinite(measured) & np.asarray(include, dtype=bool)
     count = int(valid.sum())
     if not count:
-        return dict(mae=np.nan, max_abs=np.nan, max_error_pct=np.nan, max_index=None)
+        return dict(mae=np.nan, mae_pct=np.nan, max_abs=np.nan, max_error_pct=np.nan,
+                    max_index=None)
     error = np.abs(measured[valid] - commanded[valid])
     peak = int(np.argmax(error))
     command_magnitude = abs(commanded[valid][peak])
     percentage = (100 * error[peak] / command_magnitude
                   if command_magnitude > 1e-12 else np.nan)
-    return dict(mae=np.mean(error), max_abs=error[peak], max_error_pct=percentage,
+    # Average error as a % of the average |solver| over the same samples. Dividing
+    # the averages (not averaging per-sample %) avoids blow-ups where solver ~ 0.
+    mean_command = np.mean(np.abs(commanded[valid]))
+    mae_pct = 100 * np.mean(error) / mean_command if mean_command > 1e-12 else np.nan
+    return dict(mae=np.mean(error), mae_pct=mae_pct, max_abs=error[peak],
+                max_error_pct=percentage,
                 max_index=int(np.flatnonzero(valid)[peak]))
 
 
@@ -60,11 +79,21 @@ def format_metric(value):
     return f"{value:.3g}" if np.isfinite(value) else "N/A"
 
 
+def segment_for(csv_path):
+    """Return (segment, column prefix) from a segment keyword in the file name (case-insensitive)."""
+    name = csv_path.stem.lower()
+    matches = [seg for seg in SEGMENTS if seg.lower() in name]
+    if len(matches) != 1:
+        raise ValueError("File name must contain exactly one of 'Pelvis' or 'Trunk'")
+    return matches[0], SEGMENTS[matches[0]]
+
+
 def plot_csv(csv_path):
+    segment, prefix = segment_for(csv_path)
     data = pd.read_csv(csv_path, encoding="utf-8-sig")
-    # Accept accidental spaces in headers, e.g. "CoM_Solver_ Fx".
+    # Accept accidental spaces in headers, e.g. "EE_Solver_ Fx".
     data.columns = data.columns.str.replace(" ", "", regex=False).str.strip()
-    required = [f"CoM_{source}_{c}" for source in ("Solver", "Measured")
+    required = [f"{prefix}_{source}_{c}" for source in ("Solver", "Measured")
                 for c in COMPONENTS]
     missing = [name for name in required if name not in data.columns]
     if missing:
@@ -81,11 +110,18 @@ def plot_csv(csv_path):
         x = range(len(data))
         xlabel = "Sample"
 
-    regions = mode_regions(x, data["ControlMode"]) if "ControlMode" in data.columns else []
+    if "ControlMode" not in data.columns:
+        raise ValueError("Missing ControlMode column; metrics need assist-as-needed samples")
+    regions = mode_regions(x, data["ControlMode"])
+    # Metrics use only assist-as-needed samples; the plots still show the whole CSV.
+    in_aan = (data["ControlMode"].fillna("").astype(str).str.strip().str.upper()
+              == METRIC_MODE).to_numpy()
+    aan_note = ("" if in_aan.any()
+                else " (no assist-as-needed samples, metrics N/A)")
 
     fig, axes = plt.subplots(3, 2, figsize=(14, 11), sharex=True,
                              layout="constrained")
-    fig.suptitle(f"{csv_path.name}\nAbsolute errors over the entire CSV")
+    fig.suptitle(f"{csv_path.name}\n{segment} ({prefix}) output wrench{aan_note}")
     if regions:
         present_modes = list(dict.fromkeys(mode for _, _, mode in regions))
         fig.legend(handles=[Patch(facecolor=MODE_STYLES.get(mode, (mode, "#e1bee7"))[1],
@@ -99,14 +135,14 @@ def plot_csv(csv_path):
                        alpha=0.2, zorder=0)
         for start, _, _ in regions[1:]:
             ax.axvline(start, color="gray", linestyle="--", linewidth=0.7, alpha=0.6)
-        ax.plot(x, data[f"CoM_Solver_{component}"],
-                label="Commanded (solver)", linewidth=1.5)
-        ax.plot(x, data[f"CoM_Measured_{component}"],
-                label="Measured", linestyle="--", linewidth=1.2)
-        metrics = error_metrics(data[f"CoM_Solver_{component}"],
-                                data[f"CoM_Measured_{component}"])
+        solver = data[f"{prefix}_Solver_{component}"]
+        measured = data[f"{prefix}_Measured_{component}"]
+        ax.plot(x, solver, label="Commanded (solver)", linewidth=1.5)
+        ax.plot(x, measured, label="Measured", linewidth=1.2)
+        metrics = error_metrics(solver, measured, in_aan)
         unit = "N" if component.startswith("F") else "N m"
-        m = {key: format_metric(metrics[key]) for key in ("mae", "max_abs", "max_error_pct")}
+        m = {key: format_metric(metrics[key])
+             for key in ("mae", "mae_pct", "max_abs", "max_error_pct")}
         if metrics["max_index"] is not None:
             index = metrics["max_index"]
             peak_x = x.iloc[index] if isinstance(x, pd.Series) else x[index]
@@ -119,7 +155,8 @@ def plot_csv(csv_path):
                             textcoords="offset points", ha="center", va="bottom",
                             color="red", fontsize=8)
         ax.set_title(
-            f"{component}\nAverage absolute error: {m['mae']} {unit} | "
+            f"{component}\nAverage absolute error: {m['mae']} {unit} "
+            f"({m['mae_pct']}% of mean |solver|) | "
             f"Max absolute error: {m['max_abs']} {unit}\n"
             f"Error at max-error sample: {m['max_error_pct']}% of |solver|",
             fontsize=9)
